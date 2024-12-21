@@ -7,11 +7,11 @@ const BH_M: f64 = 1.0;
 const BH_POS: Vector = vec3!(0.0, 0.0, 0.0);
 
 fn ray_color(objects: &[Object], ray: &Ray) -> Color {
-    const D_TAU: f64 = 1.0 / 4.0; // 固有時間のステップサイズ
+    const D_TAU: f64 = 1.0 / 16.0; // 固有時間のステップサイズ
 
     let mut x = ray.origin;
     let mut v = ray.direction.normalized();
-    for _ in 0..1_000 {
+    for _ in 0..10_000 {
         let dx = x - BH_POS;
         let r = dx.norm();
 
@@ -30,7 +30,15 @@ fn ray_color(objects: &[Object], ray: &Ray) -> Color {
 
         for object in objects {
             if object.sphere.hit(past_x, x) {
-                return object.color;
+                let l = x - object.sphere.center;
+                let n = 8.0;
+                let theta = ((l.z() / l.norm()).acos() * 2.0 / std::f64::consts::PI * n) as i32;
+                let phi = ((l.x().atan2(l.y()) * n).floor() / std::f64::consts::PI * n) as i32;
+                if (theta + phi) % 2 == 0 {
+                    return object.color;
+                } else {
+                    return object.color * 0.5;
+                }
             }
         }
     }
@@ -45,8 +53,20 @@ pub struct Object {
 
 fn make_scene<R: Rng>(rng: &mut R) -> Vec<Object> {
     let mut objects = Vec::<Object>::new();
-    'OUT: for _ in 0..60 {
-        let center = Vector::random_in_unit_sphere(rng) * 20.0;
+    objects.push(Object {
+        sphere: Sphere::new(vec3!(2.0, 3.0, 0.0), 1.0),
+        color: Vector::random_in_unit_sphere(rng) * 0.4 + 0.6,
+    });
+    objects.push(Object {
+        sphere: Sphere::new(vec3!(-1.0, -1.0, 3.0), 1.0),
+        color: Vector::random_in_unit_sphere(rng) * 0.4 + 0.6,
+    });
+    objects.push(Object {
+        sphere: Sphere::new(vec3!(2.0, -3.0, -1.0), 1.0),
+        color: Vector::random_in_unit_sphere(rng) * 0.4 + 0.6,
+    });
+    'OUT: for _ in 0..1 {
+        let center = Vector::random_in_unit_sphere(rng) * 4.0;
         if center.z() < -10.0 {
             continue;
         }
@@ -70,7 +90,7 @@ fn make_scene<R: Rng>(rng: &mut R) -> Vec<Object> {
 fn main() {
     let stdout = stdout();
     let mut cout = stdout.lock();
-    let mut rng = rand_pcg::Mcg128Xsl64::new(12345);
+    let mut rng = rand_pcg::Mcg128Xsl64::new(32);
 
     // camera
     let camera = CameraBuilder::new()
@@ -81,7 +101,7 @@ fn main() {
         .pin_hole();
 
     // image
-    let width = 1200_u32;
+    let width = 2400_u32;
     let height = (width as f64 / camera.aspect_ratio()).floor() as u32;
 
     // objects
