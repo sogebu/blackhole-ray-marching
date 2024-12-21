@@ -2,8 +2,8 @@ use crate::{Hit, Vector};
 
 #[derive(Debug, Clone)]
 pub struct Sphere {
-    center: Vector,
-    radius: f64,
+    pub center: Vector,
+    pub radius: f64,
 }
 
 impl Sphere {

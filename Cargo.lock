@@ -13,6 +13,7 @@ name = "blackhole-ray-marching"
 version = "0.1.0"
 dependencies = [
  "rand",
+ "rand_pcg",
  "rayon",
 ]
 
@@ -180,6 +181,15 @@ checksum = "a98fa0b8309344136abe6244130311e76997e546f76fae8054422a7539b43df7"
 dependencies = [
  "getrandom",
  "zerocopy 0.8.13",
+]
+
+[[package]]
+name = "rand_pcg"
+version = "0.9.0-beta.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a99d7fcfa979c9b311e2088b87cbb01c02f96cf3f5f01c60d412e91c35defb66"
+dependencies = [
+ "rand_core",
 ]
 
 [[package]]
