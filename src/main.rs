@@ -1,6 +1,6 @@
-use std::io::{stdout, Write};
-
 use blackhole_ray_marching::*;
+use rayon::prelude::*;
+use std::io::{stdout, Write};
 
 const BH_M: f64 = 1.0;
 const BH_POS: Vector = vec3!(0.5, 1.0, 0.0);
@@ -62,7 +62,6 @@ fn make_scene() -> Vec<Object> {
 fn main() {
     let stdout = stdout();
     let mut cout = stdout.lock();
-    let mut rng = rand_pcg::Mcg128Xsl64::new(12345);
 
     // camera
     let camera = CameraBuilder::new()
@@ -73,28 +72,34 @@ fn main() {
         .pin_hole();
 
     // image
-    let width = 200_u32;
+    let width = 400_u32;
     let height = (width as f64 / camera.aspect_ratio()).floor() as u32;
-    let samples_per_pixel = 1;
 
     // objects
     let world = make_scene();
 
     // render
+    let mut pixels = Vec::with_capacity(width as usize * height as usize);
+    for y in (0..height).rev() {
+        for x in 0..width {
+            pixels.push((y, x));
+        }
+    }
+    let colors = pixels
+        .par_iter()
+        .map(|&(y, x)| {
+            let u = x as f64 / (width as f64 - 1.0);
+            let v = y as f64 / (height as f64 - 1.0);
+            let ray = camera.get_ray(u, v);
+            ray_color(&world, &ray)
+        })
+        .collect::<Vec<_>>();
+
+    // save as ppm
     writeln!(cout, "P3").unwrap();
     writeln!(cout, "{} {}", width, height).unwrap();
     writeln!(cout, "255").unwrap();
-    for y in (0..height).rev() {
-        for x in 0..width {
-            let mut color = Color::new(0.0, 0.0, 0.0);
-            for _ in 0..samples_per_pixel {
-                let u = x as f64 / (width as f64 - 1.0);
-                let v = y as f64 / (height as f64 - 1.0);
-                let ray = camera.get_ray(&mut rng, u, v);
-                color += ray_color(&world, &ray);
-            }
-            write_color(&mut cout, color / samples_per_pixel as f64).unwrap()
-        }
-        eprintln!("{}/{}", y, height);
+    for color in colors {
+        write_color(&mut cout, color).unwrap()
     }
 }

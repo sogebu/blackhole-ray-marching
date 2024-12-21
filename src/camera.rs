@@ -147,7 +147,7 @@ pub trait Camera {
         self.horizontal().norm() / self.vertical().norm()
     }
 
-    fn get_ray<R: Rng>(&self, rng: &mut R, u: f64, v: f64) -> Ray;
+    fn get_ray(&self, u: f64, v: f64) -> Ray;
 }
 
 impl Camera for PinHoleCamera {
@@ -163,7 +163,7 @@ impl Camera for PinHoleCamera {
         self.lower_left_corner
     }
 
-    fn get_ray<R: Rng>(&self, _: &mut R, u: f64, v: f64) -> Ray {
+    fn get_ray(&self, u: f64, v: f64) -> Ray {
         Ray::new(
             self.origin,
             self.lower_left_corner + self.horizontal * u + self.vertical * v - self.origin,
@@ -184,7 +184,8 @@ impl Camera for FiniteApertureCamera {
         self.lower_left_corner
     }
 
-    fn get_ray<R: Rng>(&self, rng: &mut R, u: f64, v: f64) -> Ray {
+    fn get_ray(&self, u: f64, v: f64) -> Ray {
+        let mut rng = rand::rng();
         let (x, y) = loop {
             let x = rng.random_range(-1.0..1.0);
             let y = rng.random_range(-1.0..1.0);
