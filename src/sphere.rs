@@ -1,4 +1,4 @@
-use crate::{Hit, Vector};
+use crate::Vector;
 
 #[derive(Debug, Clone)]
 pub struct Sphere {
@@ -10,11 +10,8 @@ impl Sphere {
     pub const fn new(center: Vector, radius: f64) -> Sphere {
         Sphere { center, radius }
     }
-}
 
-impl Hit for Sphere {
-    fn hit(&self, a: Vector, b: Vector) -> bool {
-        (b - self.center).norm_squared() <= self.radius * self.radius
-            && (a - self.center).norm_squared() >= self.radius * self.radius
+    pub fn signed_distance(&self, p: Vector) -> f64 {
+        (p - self.center).norm() - self.radius
     }
 }

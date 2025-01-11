@@ -5,12 +5,27 @@ use std::io::{stdout, Write};
 
 const BH_M: f64 = 1.0;
 const BH_POS: Vector = vec3!(0.0, 0.0, 0.0);
+const BH: Sphere = Sphere::new(BH_POS, BH_M * 1.5);
 
 fn ray_color(objects: &[Object], ray: &Ray) -> Color {
     const D_TAU: f64 = 1.0 / 16.0; // 固有時間のステップサイズ
 
     let mut x = ray.origin;
     let mut v = ray.direction.normalized();
+
+    let mut min_dist = BH.signed_distance(x);
+    for object in objects {
+        let dist = object.sphere.signed_distance(x);
+        if dist < min_dist {
+            min_dist = dist;
+        }
+    }
+    // 予想外
+    if min_dist < 0.0 {
+        return vec3!(0.0, 0.0, 0.0);
+    }
+
+    let mut rest_dist = min_dist * 0.9;
     for _ in 0..10_000 {
         let dx = x - BH_POS;
         let r = dx.norm();
@@ -24,22 +39,30 @@ fn ray_color(objects: &[Object], ray: &Ray) -> Color {
         let a = dx * (-BH_M / r.powi(3) + (2.0 * BH_M / r.powi(3)) * v.dot(&dx) / r.powi(2));
 
         // update
-        let past_x = x;
         v += a * D_TAU;
         x += v * D_TAU;
+        rest_dist -= v.norm() * D_TAU;
 
-        for object in objects {
-            if object.sphere.hit(past_x, x) {
-                let l = x - object.sphere.center;
-                let n = 8.0;
-                let theta = ((l.z() / l.norm()).acos() * 2.0 / std::f64::consts::PI * n) as i32;
-                let phi = ((l.x().atan2(l.y()) * n).floor() / std::f64::consts::PI * n) as i32;
-                if (theta + phi) % 2 == 0 {
-                    return object.color;
-                } else {
-                    return object.color * 0.5;
+        if rest_dist <= 0.0 {
+            min_dist = BH.signed_distance(x);
+            for object in objects {
+                let dist = object.sphere.signed_distance(x);
+                if dist <= 0.0 {
+                    let l = x - object.sphere.center;
+                    let n = 8.0;
+                    let theta = ((l.z() / l.norm()).acos() * 2.0 / std::f64::consts::PI * n) as i32;
+                    let phi = ((l.x().atan2(l.y()) * n).floor() / std::f64::consts::PI * n) as i32;
+                    return if (theta + phi) % 2 == 0 {
+                        object.color
+                    } else {
+                        object.color * 0.5
+                    };
+                }
+                if dist < min_dist {
+                    min_dist = dist;
                 }
             }
+            rest_dist = min_dist * 0.9;
         }
     }
     vec3!(0.0, 0.0, 1.0)
@@ -65,8 +88,8 @@ fn make_scene<R: Rng>(rng: &mut R) -> Vec<Object> {
         sphere: Sphere::new(vec3!(2.0, -3.0, -1.0), 1.0),
         color: Vector::random_in_unit_sphere(rng) * 0.4 + 0.6,
     });
-    'OUT: for _ in 0..1 {
-        let center = Vector::random_in_unit_sphere(rng) * 4.0;
+    'OUT: for _ in 0..10 {
+        let center = Vector::random_in_unit_sphere(rng) * 7.0;
         if center.z() < -10.0 {
             continue;
         }
@@ -101,7 +124,7 @@ fn main() {
         .pin_hole();
 
     // image
-    let width = 2400_u32;
+    let width = 600_u32;
     let height = (width as f64 / camera.aspect_ratio()).floor() as u32;
 
     // objects

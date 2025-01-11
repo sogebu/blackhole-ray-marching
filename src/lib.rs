@@ -26,7 +26,3 @@ pub fn write_color<W: std::io::Write>(writer: &mut W, color: Color) -> std::io::
     )?;
     Ok(())
 }
-
-pub trait Hit {
-    fn hit(&self, a: Vector, b: Vector) -> bool;
-}
