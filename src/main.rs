@@ -25,7 +25,7 @@ fn ray_color(objects: &[Object], ray: &Ray) -> Color {
         return vec3!(0.0, 0.0, 0.0);
     }
 
-    let mut rest_dist = min_dist * 0.9;
+    let mut rest_dist = min_dist;
     for _ in 0..10_000 {
         let dx = x - BH_POS;
         let r = dx.norm();
@@ -62,7 +62,7 @@ fn ray_color(objects: &[Object], ray: &Ray) -> Color {
                     min_dist = dist;
                 }
             }
-            rest_dist = min_dist * 0.9;
+            rest_dist = min_dist;
         }
     }
     vec3!(0.0, 0.0, 1.0)
