@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<title>Schwarzschild real-time viewer — blackhole-flythrough</title>
+<title>Schwarzschild real-time viewer</title>
 <style>
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
                font: 13px/1.4 -apple-system, "Hiragino Sans", sans-serif; }
@@ -27,6 +27,9 @@
   <label><input id="ffo" type="checkbox" checked> 自由落下カメラ (FFO)</label>
   <label><input id="dop" type="checkbox"> ドップラー効果 <span class="note">(色 + 明るさ g&#8308;)</span></label>
   <label><input id="eternal" type="checkbox"> 永久 BH <span class="note">(あの世 mode、現実の BH は崩壊型 = OFF)</span></label>
+  <label><input id="disk" type="checkbox"> 降着円盤 <span class="note">(Kepler 円盤 ISCO&ndash;12 r<sub>S</sub>、光子球の外まで)</span></label>
+  <label>円盤の傾き <span id="incval"></span>&deg;
+    <input id="inc" type="range" min="0" max="89" step="1" value="80"></label>
   <label>質量 <select id="mass">
       <option value="sun">太陽</option>
       <option value="SgrA" selected>Sgr A*</option>
@@ -57,13 +60,24 @@ in vec2 vNdc; out vec4 frag;
 uniform sampler2D uTab;
 uniform sampler2D uIntTab;   // interior (r, chi) -> (psi, g, fate, 0)
 uniform sampler2D uIntR;     // interior r grid (1 x int_nR), ascending
+uniform sampler2D uUS;       // disk: u(sigma) from periastron   (scattering)
+uniform sampler2D uAS;       // disk: azimuth(v = sqrt(r - p))   (scattering)
+uniform sampler2D uUC;       // disk: u(sigma) from the horizon  (plunging)
+uniform sampler2D uAC;       // disk: azimuth(ln(r - 1))         (plunging)
+uniform sampler2D uAux;      // disk: per-row (p, arc_scat, arc_cap, 0)
 uniform float uNR, uNT, uLogRmin, uLogRmax, uT0, uBcr;
 uniform float uIntNR, uIntNChi;
+uniform float uDNY, uDNS, uDNV, uDY0, uDY1, uDZ0, uDZ1;
+uniform float uDVmax, uDW0, uDW1, uDBmax;
+uniform float uRin, uRout, uTmax, uExpo;
+uniform vec3 uZd;                    // disk normal (world frame)
 uniform float uR, uTanHalf, uAspect;
 uniform vec3 uFwd, uRight, uUp;
-uniform bool uFFO, uDop, uEternal;   // uEternal: keep regions III/IV
+uniform bool uFFO, uDop, uEternal, uDisk;   // uEternal: keep regions III/IV
 const float PI = 3.141592653589793;
 const float R_ENGINE_SWITCH = 1.10;   // below this: interior lookup engine
+const float R_DISK_MIN = 1.52;        // disk lookup: camera outside the
+                                      // photon sphere (disk_table.py scope)
 
 float psiLookup(float R, float t){
   float ur = (log(R) - uLogRmin) / (uLogRmax - uLogRmin) * (uNR - 1.0);
@@ -159,6 +173,76 @@ vec3 dopplerShift(vec3 c, float g){
                     bbB(TofB(C.b) * g)) / 255.0, 0.0, 1.0);
 }
 
+// ---- accretion disk (python reference: disk_table.py lookup_r + disk.py;
+// physics SoT: BH_shooter.tex Sec. 5). Orbits are b-anchored, so the same
+// four textures serve every camera radius R > 1.52 (outside the photon
+// sphere; below it a reflected outgoing branch exists that the tables do
+// not carry, so the disk is disabled there).
+float fetchBilin(sampler2D tex, float rowf, float colf, float nrow, float ncol){
+  rowf = clamp(rowf, 0.0, nrow - 1.0001);
+  colf = clamp(colf, 0.0, ncol - 1.0001);
+  float i0 = floor(rowf), j0 = floor(colf);
+  float fr = rowf - i0, fc = colf - j0;
+  int i = int(i0), j = int(j0);
+  float p00 = texelFetch(tex, ivec2(j,     i    ), 0).r;
+  float p01 = texelFetch(tex, ivec2(j + 1, i    ), 0).r;
+  float p10 = texelFetch(tex, ivec2(j,     i + 1), 0).r;
+  float p11 = texelFetch(tex, ivec2(j + 1, i + 1), 0).r;
+  return mix(mix(p00, p01, fc), mix(p10, p11, fc), fr);
+}
+
+vec3 auxFetch(float rowf){
+  rowf = clamp(rowf, 0.0, uDNY - 1.0001);
+  float i0 = floor(rowf); int i = int(i0);
+  vec4 a0 = texelFetch(uAux, ivec2(i, 0), 0);
+  vec4 a1 = texelFetch(uAux, ivec2(i + 1, 0), 0);
+  return mix(a0, a1, rowf - i0).xyz;
+}
+
+// periastron p^3 = b^2 (p - 1): Newton from p0 = b converges monotonically;
+// interpolating p from a table is NOT usable here (v = sqrt(R - p) amplifies
+// any p error for pixels near chi = 90 deg — see disk_table.py)
+float periastron(float b){
+  float p = b;
+  for (int k = 0; k < 24; ++k){
+    float f = p * p * p - b * b * (p - 1.0);
+    float fp = max(3.0 * p * p - b * b, 1e-3);
+    p -= f / fp;
+  }
+  return p;
+}
+
+// crossing radius at in-plane azimuth fk from the camera; 0 = no crossing
+float diskR(float b, bool ingoing, float fk){
+  if (b > uDBmax) return 0.0;          // periastron beyond any disk edge
+  if (b > uBcr) {
+    float rowf = (log(max(b - uBcr, 1e-7)) - uDY0) / (uDY1 - uDY0) * (uDNY - 1.0);
+    float at = auxFetch(rowf).y;
+    float v = sqrt(max(uR - periastron(b), 0.0));
+    float angCam = fetchBilin(uAS, rowf, v / uDVmax * (uDNV - 1.0), uDNY, uDNV);
+    float ang = ingoing ? abs(angCam - fk) : angCam + fk;
+    if (ang > at) return 0.0;
+    float u = fetchBilin(uUS, rowf, ang / at * (uDNS - 1.0), uDNY, uDNS);
+    return (u > 1e-6) ? 1.0 / u : 0.0;
+  }
+  float rowf = (log(max(uBcr - b, 1e-7)) - uDZ0) / (uDZ1 - uDZ0) * (uDNY - 1.0);
+  float at = auxFetch(rowf).z;
+  float w = log(max(uR - 1.0, 0.4));
+  float angCam = fetchBilin(uAC, rowf, (w - uDW0) / (uDW1 - uDW0) * (uDNV - 1.0),
+                            uDNY, uDNV);
+  float ang = ingoing ? angCam - fk : angCam + fk;
+  if (ang < 0.0 || ang > at) return 0.0;   // < 0: inside the horizon already
+  float u = fetchBilin(uUC, rowf, ang / at * (uDNS - 1.0), uDNY, uDNS);
+  return (u > 1e-6) ? 1.0 / u : 0.0;
+}
+
+// Shakura-Sunyaev shape, T = uTmax at the profile peak x = 49/36
+float diskT(float r){
+  float x = r / uRin;
+  float f4 = max((1.0 - inversesqrt(x)) / (x * x * x), 0.0) / 0.0566524;
+  return uTmax * pow(f4, 0.25);
+}
+
 vec3 skyColor(float th, float ph){
   float td = degrees(th);
   float pd = degrees(mod(ph, 2.0 * PI));
@@ -204,6 +288,36 @@ void main(){
   } else {
     float beta = uFFO ? sqrt(1.0 / uR) : 0.0;
     float cSt = clamp(uFFO ? (c - beta) / (1.0 - beta * c) : c, -1.0, 1.0);
+    // ---- accretion disk first: crossings can sit in front of the shadow.
+    // b, phi_1, m_z all come from the STATIC-frame angle / the transverse
+    // direction p, both invariant under the radial FFO boost.
+    if (uDisk && uR > R_DISK_MIN) {
+      float A = 1.0 - 1.0 / uR;
+      float b = uR * sqrt(max(1.0 - cSt * cSt, 0.0)) / sqrt(A);
+      float e2z = dot(p, uZd);
+      float mz = dot(cross(vec3(0.0, 0.0, 1.0), p), uZd);
+      float phi1 = mod(atan(-uZd.z, e2z), PI);
+      if (phi1 < 1e-6) phi1 = PI;
+      bool ingoing = cSt > 0.0;
+      for (int k = 0; k < 3; ++k) {
+        float r = diskR(b, ingoing, phi1 + float(k) * PI);
+        if (r >= uRin && r <= uRout) {
+          // g = (omega camera)/(omega Keplerian emitter); + sign because the
+          // traced ray's spatial momentum is the real photon's, flipped
+          float gE = sqrt(max(1.0 - 1.5 / r, 0.0))
+                   / (1.0 + sqrt(0.5 / (r * r * r)) * b * mz);
+          float gd = uFFO ? gE * (1.0 + beta * cSt) / A : gE / sqrt(A);
+          // blackbody at T_obs = g T(r); brightness (T_obs/T_max)^4 carries
+          // the whole g^4 beaming (no separate factor: that would double it)
+          float Tobs = clamp((uDop ? gd : 1.0) * diskT(r), 300.0, 4.0e4);
+          float inten = uExpo * pow(Tobs / uTmax, 4.0);
+          vec3 dc = vec3(bbR(Tobs), bbG(Tobs), bbB(Tobs)) / 255.0
+                    * (inten / (1.0 + inten));
+          frag = vec4(dc, 1.0);
+          return;
+        }
+      }
+    }
     float chiSt = acos(cSt);
     float edge = edgeOf(uR);
     if (chiSt <= edge) fate = 0;
@@ -238,10 +352,15 @@ function compile(type, src){
 
 async function main(){
   const meta = await (await fetch("meta.json")).json();
-  const [buf, ibuf, rbuf] = await Promise.all([
+  const [buf, ibuf, rbuf, dus, das, duc, dac, daux] = await Promise.all([
     fetch("psi_table.bin").then(r => r.arrayBuffer()),
     fetch("interior_table.bin").then(r => r.arrayBuffer()),
     fetch("interior_rgrid.bin").then(r => r.arrayBuffer()),
+    fetch("disk_u_scat.bin").then(r => r.arrayBuffer()),
+    fetch("disk_a_scat.bin").then(r => r.arrayBuffer()),
+    fetch("disk_u_cap.bin").then(r => r.arrayBuffer()),
+    fetch("disk_a_cap.bin").then(r => r.arrayBuffer()),
+    fetch("disk_aux.bin").then(r => r.arrayBuffer()),
   ]);
   const data = new Float32Array(buf);
 
@@ -277,12 +396,26 @@ async function main(){
   makeTex(1, gl.RGBA32F, meta.int_nchi, meta.int_nR, gl.RGBA,
           new Float32Array(ibuf));
   makeTex(2, gl.R32F, meta.int_nR, 1, gl.RED, new Float32Array(rbuf));
+  makeTex(3, gl.R32F, meta.disk_nsig, meta.disk_ny, gl.RED,
+          new Float32Array(dus));
+  makeTex(4, gl.R32F, meta.disk_nv, meta.disk_ny, gl.RED,
+          new Float32Array(das));
+  makeTex(5, gl.R32F, meta.disk_nsig, meta.disk_ny, gl.RED,
+          new Float32Array(duc));
+  makeTex(6, gl.R32F, meta.disk_nv, meta.disk_ny, gl.RED,
+          new Float32Array(dac));
+  makeTex(7, gl.RGBA32F, meta.disk_ny, 1, gl.RGBA, new Float32Array(daux));
   gl.activeTexture(gl.TEXTURE0);
 
   const U = n => gl.getUniformLocation(prog, n);
   gl.uniform1i(U("uTab"), 0);
   gl.uniform1i(U("uIntTab"), 1);
   gl.uniform1i(U("uIntR"), 2);
+  gl.uniform1i(U("uUS"), 3);
+  gl.uniform1i(U("uAS"), 4);
+  gl.uniform1i(U("uUC"), 5);
+  gl.uniform1i(U("uAC"), 6);
+  gl.uniform1i(U("uAux"), 7);
   gl.uniform1f(U("uNR"), meta.nR);
   gl.uniform1f(U("uNT"), meta.nt);
   gl.uniform1f(U("uLogRmin"), Math.log(meta.R_min));
@@ -291,6 +424,21 @@ async function main(){
   gl.uniform1f(U("uBcr"), meta.b_cr);
   gl.uniform1f(U("uIntNR"), meta.int_nR);
   gl.uniform1f(U("uIntNChi"), meta.int_nchi);
+  gl.uniform1f(U("uDNY"), meta.disk_ny);
+  gl.uniform1f(U("uDNS"), meta.disk_nsig);
+  gl.uniform1f(U("uDNV"), meta.disk_nv);
+  gl.uniform1f(U("uDY0"), meta.disk_y0);
+  gl.uniform1f(U("uDY1"), meta.disk_y1);
+  gl.uniform1f(U("uDZ0"), meta.disk_z0);
+  gl.uniform1f(U("uDZ1"), meta.disk_z1);
+  gl.uniform1f(U("uDVmax"), meta.disk_vmax);
+  gl.uniform1f(U("uDW0"), meta.disk_w0);
+  gl.uniform1f(U("uDW1"), meta.disk_w1);
+  gl.uniform1f(U("uDBmax"), meta.disk_b_max);
+  gl.uniform1f(U("uRin"), 3.0);      // ISCO (canonical defaults: DESIGN.md)
+  gl.uniform1f(U("uRout"), 12.0);
+  gl.uniform1f(U("uTmax"), 7000.0);
+  gl.uniform1f(U("uExpo"), 3.0);
 
   // ---- camera state (R range now crosses the horizon down to 0.06)
   let yaw = 0, pitch = 0, fov = 100;
@@ -339,6 +487,12 @@ async function main(){
     el("R").value = RToSlider(R);
   }
 
+  // enabling the disk auto-enables Doppler (the physically honest default;
+  // unchecking dop afterwards is the deliberate "naive colors" comparison)
+  el("disk").addEventListener("change", () => {
+    if (el("disk").checked) el("dop").checked = true;
+  });
+
   let dragging = false, px = 0, py = 0;
   canvas.addEventListener("pointerdown", e => {
     dragging = true; px = e.clientX; py = e.clientY;
@@ -379,6 +533,8 @@ async function main(){
       if (o.ffo !== undefined) el("ffo").checked = o.ffo;
       if (o.dop !== undefined) el("dop").checked = o.dop;
       if (o.eternal !== undefined) el("eternal").checked = o.eternal;
+      if (o.disk !== undefined) el("disk").checked = o.disk;
+      if (o.inc !== undefined) el("inc").value = o.inc;
       if (o.mass !== undefined) el("mass").value = o.mass;
       if (o.fov !== undefined) el("fov").value = o.fov;
       if (o.yaw !== undefined) yaw = o.yaw;
@@ -387,6 +543,7 @@ async function main(){
     state(){ return { Rslider: el("R").value, yaw, pitch,
                       fov: el("fov").value, ffo: el("ffo").checked,
                       dop: el("dop").checked, eternal: el("eternal").checked,
+                      disk: el("disk").checked, inc: el("inc").value,
                       mass: el("mass").value }; },
     scan(){
       const w = canvas.width, h = canvas.height;
@@ -440,6 +597,10 @@ async function main(){
     gl.uniform1i(U("uFFO"), el("ffo").checked ? 1 : 0);
     gl.uniform1i(U("uDop"), el("dop").checked ? 1 : 0);
     gl.uniform1i(U("uEternal"), el("eternal").checked ? 1 : 0);
+    gl.uniform1i(U("uDisk"), el("disk").checked ? 1 : 0);
+    const inc = parseFloat(el("inc").value) * Math.PI / 180;
+    el("incval").textContent = el("inc").value;
+    gl.uniform3fv(U("uZd"), [0, Math.sin(inc), Math.cos(inc)]);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
     frames++;
@@ -454,7 +615,9 @@ async function main(){
       : `R = ${R.toFixed(2)} rS   beta = ` +
         `${(el("ffo").checked ? Math.sqrt(1 / R) : 0).toFixed(3)}   ` +
         `tau to horizon = ${tauHor.toFixed(2)} rS/c (${fmtSec(tauHor * rsSec)})   `;
-    document.getElementById("hud").textContent = hudPre +
+    const diskNote = (el("disk").checked && R <= 1.52)
+      ? "円盤表示は光子球の外まで (R > 1.52)   " : "";
+    document.getElementById("hud").textContent = hudPre + diskNote +
       `fps = ${fps.toFixed(0)}   ` +
       `f32 lookup err ~ ${meta.f32_bilinear_vs_exact_rad.toExponential(1)} rad`;
     if (once !== true) requestAnimationFrame(draw);
