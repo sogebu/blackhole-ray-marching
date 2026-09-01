@@ -43,7 +43,7 @@
     <span class="note">固有時間 ×<span id="spdval"></span></span>
     <input id="spd" type="range" min="0" max="1" step="0.01" value="0.5"
            style="width:110px"></label>
-  <div class="note">drag: 見回し / wheel: fov / 自由飛行: WASD・矢印で推進</div>
+  <div class="note">drag・矢印: 見回し / wheel: fov / 自由飛行: WASDで並進</div>
 </div>
 <div id="hud"></div>
 <script>
@@ -561,10 +561,10 @@ async function main(){
   }
   function thrustDirection(fwd, right){
     let v = [0, 0, 0];
-    if (keys.has("w") || keys.has("arrowup")) v = add(v, fwd);
-    if (keys.has("s") || keys.has("arrowdown")) v = sub(v, fwd);
-    if (keys.has("d") || keys.has("arrowright")) v = add(v, right);
-    if (keys.has("a") || keys.has("arrowleft")) v = sub(v, right);
+    if (keys.has("w")) v = add(v, fwd);
+    if (keys.has("s")) v = sub(v, fwd);
+    if (keys.has("d")) v = add(v, right);
+    if (keys.has("a")) v = sub(v, right);
     return norm(v) > 1e-12 ? unit(v) : null;
   }
   function altitudeHoldAcceleration(){
@@ -695,8 +695,10 @@ async function main(){
   });
   el("hover").addEventListener("click", hover);
   window.addEventListener("keydown", e => {
-    if (e.metaKey || e.ctrlKey || e.altKey || /^(INPUT|SELECT|BUTTON)$/.test(e.target.tagName)) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
     const key = e.key.toLowerCase();
+    const controls = ["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", "0", "c"];
+    if (!controls.includes(key) && /^(INPUT|SELECT|BUTTON)$/.test(e.target.tagName)) return;
     if (key === "0") { e.preventDefault(); hover(); return; }
     if (key === "c") {
       e.preventDefault();
@@ -704,7 +706,10 @@ async function main(){
       circularize(viewBasis().right);
       return;
     }
-    if (["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright"].includes(key)) {
+    if (["arrowup", "arrowdown", "arrowleft", "arrowright"].includes(key)) {
+      e.preventDefault(); keys.add(key); return;
+    }
+    if (["w", "a", "s", "d"].includes(key)) {
       e.preventDefault();
       if (!camera.active) startFreeFlight();
       keys.add(key);
@@ -740,7 +745,19 @@ async function main(){
     el("fov").value = fov;
   }, { passive: false });
 
-  let frames = 0, fps = 0, t0 = performance.now();
+  let frames = 0, fps = 0, t0 = performance.now(), lastLookNow = performance.now();
+
+  function keyboardLook(){
+    const now = performance.now();
+    const dt = Math.min(Math.max((now - lastLookNow) / 1000, 0), 0.05);
+    lastLookNow = now;
+    const rate = 1.4;  // rad / wall-clock second, independent of simulation speed
+    if (keys.has("arrowleft")) yaw += rate * dt;
+    if (keys.has("arrowright")) yaw -= rate * dt;
+    if (keys.has("arrowup")) pitch += rate * dt;
+    if (keys.has("arrowdown")) pitch -= rate * dt;
+    pitch = Math.max(-1.55, Math.min(1.55, pitch));
+  }
 
   // machine-verification hook (used by the repo's browser-driven checks):
   // __bh.snap(opts) atomically applies a state, draws synchronously, scans
@@ -803,6 +820,7 @@ async function main(){
       canvas.width = w; canvas.height = h;
       gl.viewport(0, 0, w, h);
     }
+    if (once !== true) keyboardLook();
     fov = parseFloat(el("fov").value);
     const basis = viewBasis();
     if (camera.active) flightStep(basis.fwd, basis.right);
