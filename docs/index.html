@@ -43,7 +43,7 @@
     <span class="note">固有時間 ×<span id="spdval"></span></span>
     <input id="spd" type="range" min="0" max="1" step="0.01" value="0.5"
            style="width:110px"></label>
-  <div class="note">drag・矢印: 自分の周りを見回し / wheel: fov / 自由飛行: WASDで並進</div>
+  <div class="note">drag・矢印: 自分の周りを見回し / wheel: fov / 自由飛行: WASDで並進（離すと減速）</div>
 </div>
 <div id="hud"></div>
 <script>
@@ -488,14 +488,16 @@ async function main(){
   const unit = a => scale(1 / Math.max(norm(a), 1e-14), a);
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
   const FLIGHT_MIN = 1.52, FLIGHT_MAX = Math.min(29.95, Rmax);
-  const FLIGHT_STEP = 0.02, PILOT_THRUST = 0.25;
+  const FLIGHT_STEP = 0.02, FLIGHT_FRAME_BUDGET = 0.04;
+  const PILOT_THRUST = 0.25, FLIGHT_DAMPING = 1.6;
 
   // The camera event has a true world position during free flight.  At rest
   // the retained rHat lets a player stop anywhere on an orbit without the
   // old radius slider snapping the world back to its initial z-axis ray.
   const camera = {
     R: sliderToR(parseFloat(el("R").value)), rHat: [0, 0, 1], hHat: [0, 1, 0],
-    E: 0, L: 0, rd: 0, active: false, lastNow: performance.now(), message: "",
+    E: 0, L: 0, rd: 0, active: false, lastNow: performance.now(),
+    timeDebt: 0, orbitLock: false, message: "",
   };
   const keys = new Set();
 
@@ -572,7 +574,8 @@ async function main(){
     const dPhi = h / 6 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
     if (Rnext <= FLIGHT_MIN || Rnext >= FLIGHT_MAX) {
       camera.R = clamp(Rnext, FLIGHT_MIN, FLIGHT_MAX);
-      camera.active = false; el("free").checked = false; el("ffo").checked = false;
+      camera.active = false; camera.timeDebt = 0;
+      el("free").checked = false; el("ffo").checked = false;
       camera.message = Rnext <= FLIGHT_MIN
         ? "自由飛行は R = 1.52 rS で停止（内側は放射 FFO mode の領域）"
         : "自由飛行は table 上限 R = 30 rS で停止";
@@ -603,8 +606,15 @@ async function main(){
   }
   function flightAcceleration(fwd, right){
     const direction = thrustDirection(fwd, right);
-    return add(altitudeHoldAcceleration(),
-      direction ? scale(PILOT_THRUST, direction) : [0, 0, 0]);
+    if (direction) camera.orbitLock = false;
+    const beta = flightBeta();
+    const u = scale(1 / Math.sqrt(1 - dot3(beta, beta)), beta);
+    // Powered flight is a speed-controlled assist, rather than an undamped
+    // rocket.  This makes releasing WASD settle back to a hover.  A deliberate
+    // C circular geodesic is exempt so it remains an exact no-thrust orbit.
+    const damping = camera.orbitLock ? [0, 0, 0] : scale(-FLIGHT_DAMPING, u);
+    return add(altitudeHoldAcceleration(), add(damping,
+      direction ? scale(PILOT_THRUST, direction) : [0, 0, 0]));
   }
   function accelerate(h, acceleration){
     // Add the hold and pilot accelerations to proper velocity rather than
@@ -619,10 +629,13 @@ async function main(){
     if (!camera.active) return;
     const now = performance.now();
     const speed = 0.2 * Math.pow(100, parseFloat(el("spd").value));
-    let remain = Math.max(0, (now - camera.lastNow) / 1000 * speed);
+    camera.timeDebt += Math.max(0, (now - camera.lastNow) / 1000 * speed);
     camera.lastNow = now;
-    // Fixed RK4 substeps are deliberately not capped: a backgrounded tab can
-    // supply a large dtau, but no elapsed proper time is silently discarded.
+    // Never discard elapsed proper time, but repay a long background/frame
+    // stall over later frames so a single delayed render cannot look like a
+    // teleport.  Normal 60 fps updates fit inside this budget.
+    let remain = Math.min(camera.timeDebt, FLIGHT_FRAME_BUDGET);
+    camera.timeDebt -= remain;
     while (remain > 0 && camera.active) {
       const h = Math.min(FLIGHT_STEP, remain);
       // Symmetric half-kicks make the no-input static solution stable: the
@@ -647,6 +660,7 @@ async function main(){
     camera.R = requestedR;
     seedFlight(camera.R, [0, 0, 0]);
     camera.active = true; camera.lastNow = performance.now();
+    camera.timeDebt = 0; camera.orbitLock = false;
     camera.message = "現在位置で自由飛行を開始（重力補償中）";
     el("ffo").checked = false; el("free").checked = true;
     return true;
@@ -663,7 +677,8 @@ async function main(){
     tHat = unit(tHat);
     const beta = Math.sqrt(1 / (2 * camera.R * (1 - 1 / camera.R)));
     seedFlight(camera.R, scale(beta, tHat));
-    camera.active = true; camera.lastNow = performance.now(); camera.message = "円軌道に入りました";
+    camera.active = true; camera.lastNow = performance.now();
+    camera.timeDebt = 0; camera.orbitLock = true; camera.message = "円軌道に入りました";
     el("ffo").checked = false; el("free").checked = true;
   }
   function hover(){
@@ -676,6 +691,7 @@ async function main(){
     falling = false; keys.clear(); camera.R = requestedR;
     seedFlight(camera.R, [0, 0, 0]);
     camera.active = true; camera.lastNow = performance.now();
+    camera.timeDebt = 0; camera.orbitLock = false;
     camera.message = "静止（重力補償中）";
     el("fall").textContent = "▶ 自由落下"; el("ffo").checked = false;
     el("free").checked = true;
