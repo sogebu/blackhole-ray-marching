@@ -43,7 +43,7 @@
     <span class="note">固有時間 ×<span id="spdval"></span></span>
     <input id="spd" type="range" min="0" max="1" step="0.01" value="0.5"
            style="width:110px"></label>
-  <div class="note">drag・矢印: 見回し / wheel: fov / 自由飛行: WASDで並進</div>
+  <div class="note">drag・矢印: 自分の周りを見回し / wheel: fov / 自由飛行: WASDで並進</div>
 </div>
 <div id="hud"></div>
 <script>
@@ -459,6 +459,9 @@ async function main(){
 
   // ---- camera state (R range now crosses the horizon down to 0.06)
   let yaw = 0, pitch = 0, fov = 100;
+  // This is a camera-attached triad, not a coordinate triad centred on the
+  // black hole.  Every look input rotates these three axes in place.
+  const view = { fwd: [0, 0, -1], right: [1, 0, 0], up: [0, 1, 0] };
   // mass presets: r_S/c in seconds (params.py is the reference)
   const RS_SEC = { sun: 9.851e-6, SgrA: 9.851e-6 * 4.30e6, M87: 9.851e-6 * 6.5e9 };
   const fmtSec = s => {
@@ -498,10 +501,31 @@ async function main(){
   const keys = new Set();
 
   function viewBasis(){
-    const cy = Math.cos(yaw), sy = Math.sin(yaw);
-    const cp = Math.cos(pitch), sp = Math.sin(pitch);
-    return { fwd: [sy * cp, sp, -cy * cp], right: [cy, 0, sy],
-             up: [-sy * sp, cp, cy * sp] };
+    return { fwd: view.fwd, right: view.right, up: view.up };
+  }
+  function setViewBasis(fwd, up){
+    view.fwd = unit(fwd);
+    view.right = unit(cross(view.fwd, up));
+    view.up = unit(cross(view.right, view.fwd));
+  }
+  function turnView(yawDelta, pitchDelta){
+    // Yaw is about this camera's current up; pitch is about its current right.
+    // Therefore a turn remains on the spot even after looking away from the BH.
+    if (yawDelta) {
+      view.fwd = rotateAround(view.fwd, view.up, yawDelta);
+      view.right = rotateAround(view.right, view.up, yawDelta);
+    }
+    if (pitchDelta) {
+      view.fwd = rotateAround(view.fwd, view.right, pitchDelta);
+      view.up = rotateAround(view.up, view.right, pitchDelta);
+    }
+    setViewBasis(view.fwd, view.up);
+    yaw += yawDelta; pitch += pitchDelta;
+  }
+  function setLegacyLook(nextYaw, nextPitch){
+    view.fwd = [0, 0, -1]; view.right = [1, 0, 0]; view.up = [0, 1, 0];
+    yaw = 0; pitch = 0;
+    turnView(nextYaw, nextPitch);
   }
   function fallbackNormal(rHat){
     const trial = Math.abs(rHat[1]) < .9 ? [0, 1, 0] : [1, 0, 0];
@@ -755,9 +779,8 @@ async function main(){
   });
   canvas.addEventListener("pointermove", e => {
     if (!dragging) return;
-    yaw   -= (e.clientX - px) * 0.0032 * fov / 100;
-    pitch += (e.clientY - py) * 0.0032 * fov / 100;
-    pitch = Math.max(-1.55, Math.min(1.55, pitch));
+    turnView(-(e.clientX - px) * 0.0032 * fov / 100,
+             -(e.clientY - py) * 0.0032 * fov / 100);
     px = e.clientX; py = e.clientY;
   });
   canvas.addEventListener("pointerup", () => dragging = false);
@@ -772,11 +795,11 @@ async function main(){
   const LOOK_RATE = 1.1, LOOK_TAP = 0.035;
 
   function nudgeLook(key, amount){
-    if (key === "arrowleft") yaw += amount;
-    if (key === "arrowright") yaw -= amount;
-    if (key === "arrowup") pitch += amount;
-    if (key === "arrowdown") pitch -= amount;
-    pitch = Math.max(-1.55, Math.min(1.55, pitch));
+    const yawDelta = key === "arrowleft" ? amount
+      : key === "arrowright" ? -amount : 0;
+    const pitchDelta = key === "arrowup" ? amount
+      : key === "arrowdown" ? -amount : 0;
+    turnView(yawDelta, pitchDelta);
   }
   function resetLookMotion(){
     lookYawVelocity = 0; lookPitchVelocity = 0;
@@ -805,9 +828,7 @@ async function main(){
         if (keys.has(key) && press) press.advanced = true;
       }
     }
-    yaw += lookYawVelocity * dt;
-    pitch += lookPitchVelocity * dt;
-    pitch = Math.max(-1.55, Math.min(1.55, pitch));
+    turnView(lookYawVelocity * dt, lookPitchVelocity * dt);
   }
 
   // machine-verification hook (used by the repo's browser-driven checks):
@@ -833,6 +854,11 @@ async function main(){
       if (o.inc !== undefined) el("inc").value = o.inc;
       if (o.mass !== undefined) el("mass").value = o.mass;
       if (o.fov !== undefined) el("fov").value = o.fov;
+      if (o.viewFwd !== undefined && o.viewUp !== undefined) {
+        setViewBasis(o.viewFwd, o.viewUp);
+      } else if (o.yaw !== undefined || o.pitch !== undefined) {
+        setLegacyLook(o.yaw ?? 0, o.pitch ?? 0);
+      }
       if (o.yaw !== undefined) yaw = o.yaw;
       if (o.pitch !== undefined) pitch = o.pitch;
     },
@@ -840,7 +866,8 @@ async function main(){
                       fov: el("fov").value, ffo: el("ffo").checked,
                       dop: el("dop").checked, eternal: el("eternal").checked,
                       disk: el("disk").checked, inc: el("inc").value,
-                      mass: el("mass").value }; },
+                      mass: el("mass").value,
+                      viewFwd: [...view.fwd], viewUp: [...view.up] }; },
     scan(){
       const w = canvas.width, h = canvas.height;
       const cx = Math.floor(w / 2), cy = Math.floor(h / 2);
