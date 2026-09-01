@@ -485,6 +485,7 @@ async function main(){
   const unit = a => scale(1 / Math.max(norm(a), 1e-14), a);
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
   const FLIGHT_MIN = 1.52, FLIGHT_MAX = Math.min(29.95, Rmax);
+  const FLIGHT_START_R = 8.0;
   const FLIGHT_STEP = 0.02, THRUST = 0.25;
 
   // The camera event has a true world position during free flight.  At rest
@@ -594,10 +595,16 @@ async function main(){
   }
   function startFreeFlight(){
     falling = false; el("fall").textContent = "▶ 自由落下";
-    camera.R = sliderToR(parseFloat(el("R").value));
-    seedFlight(camera.R, [0, 0, 0]);
-    camera.active = true; camera.lastNow = performance.now(); camera.message = "";
-    el("ffo").checked = false; el("free").checked = true;
+    const requestedR = sliderToR(parseFloat(el("R").value));
+    // The viewer opens near the horizon for the falling-camera demo.  Starting
+    // a geodesic there from rest immediately plunges before the player can
+    // steer, so free flight starts on a safe, stable circular orbit instead.
+    camera.R = requestedR > 3.0 ? clamp(requestedR, FLIGHT_MIN, FLIGHT_MAX) : FLIGHT_START_R;
+    circularize(viewBasis().right);
+    camera.lastNow = performance.now();
+    camera.message = requestedR > 3.0
+      ? "自由飛行を円軌道から開始"
+      : "自由飛行は安全な R = 8 rS の円軌道から開始";
   }
   function circularize(right){
     camera.R = clamp(camera.R, FLIGHT_MIN, FLIGHT_MAX);
