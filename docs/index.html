@@ -80,6 +80,7 @@ const float PI = 3.141592653589793;
 const float R_ENGINE_SWITCH = 1.10;   // below this: interior lookup engine
 const float R_DISK_MIN = 1.52;        // disk lookup: camera outside the
                                       // photon sphere (disk_table.py scope)
+const vec3 SKY_NORTH = vec3(0.0, 0.0, 1.0);  // fixed celestial coordinate frame
 
 float psiLookup(float R, float t){
   float ur = (log(R) - uLogRmin) / (uLogRmax - uLogRmin) * (uNR - 1.0);
@@ -347,8 +348,12 @@ void main(){
   if (fate == 0) { frag = vec4(0.0, 0.0, 0.0, 1.0); return; }
 
   vec3 sky = -cos(psi) * aHat + sin(psi) * p;
-  float th = acos(clamp(dot(sky, aHat), -1.0, 1.0));
-  float ph = atan(dot(sky, vec3(0.0, 1.0, 0.0)), dot(sky, vec3(1.0, 0.0, 0.0)));
+  // The graticule labels positions on one fixed celestial sphere.  Using
+  // aHat for latitude while using world x/y for longitude mixed two frames:
+  // it happened to agree on the initial z axis but became contradictory once
+  // the camera translated.  Both angles now use the same fixed world frame.
+  float th = acos(clamp(dot(sky, SKY_NORTH), -1.0, 1.0));
+  float ph = atan(sky.y, sky.x);
 
   vec3 col = (fate == 3) ? skyColorIII(th, ph) : skyColor(th, ph);
   if (uDop && (uFFO || uFlying || uR < R_ENGINE_SWITCH)) {
