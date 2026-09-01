@@ -694,6 +694,11 @@ async function main(){
     circularize(viewBasis().right);
   });
   el("hover").addEventListener("click", hover);
+  const ARROW_KEYS = new Set(["arrowup", "arrowdown", "arrowleft", "arrowright"]);
+  // A key tap can begin and end between animation frames.  Record it so that
+  // such a tap always makes one small, deterministic turn rather than being
+  // randomly ignored or turning by a frame-dependent amount.
+  const arrowPresses = new Map();
   window.addEventListener("keydown", e => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     const key = e.key.toLowerCase();
@@ -706,8 +711,15 @@ async function main(){
       circularize(viewBasis().right);
       return;
     }
-    if (["arrowup", "arrowdown", "arrowleft", "arrowright"].includes(key)) {
-      e.preventDefault(); keys.add(key); return;
+    if (ARROW_KEYS.has(key)) {
+      e.preventDefault();
+      if (!keys.has(key)) {
+        const wasIdle = ![...ARROW_KEYS].some(k => keys.has(k));
+        keys.add(key); arrowPresses.set(key, { advanced: false });
+        // Do not turn an old animation-frame gap into a visible first-frame jump.
+        if (wasIdle) lastLookNow = performance.now();
+      }
+      return;
     }
     if (["w", "a", "s", "d"].includes(key)) {
       e.preventDefault();
@@ -715,9 +727,19 @@ async function main(){
       keys.add(key);
     }
   });
-  window.addEventListener("keyup", e => keys.delete(e.key.toLowerCase()));
-  window.addEventListener("blur", () => keys.clear());
-  document.addEventListener("visibilitychange", () => { if (document.hidden) keys.clear(); });
+  window.addEventListener("keyup", e => {
+    const key = e.key.toLowerCase();
+    if (ARROW_KEYS.has(key)) {
+      const press = arrowPresses.get(key);
+      keys.delete(key); arrowPresses.delete(key);
+      if (press && !press.advanced) nudgeLook(key, LOOK_TAP);
+      if (![...ARROW_KEYS].some(k => keys.has(k))) resetLookMotion();
+      return;
+    }
+    keys.delete(key);
+  });
+  window.addEventListener("blur", clearControls);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) clearControls(); });
 
   // enabling the disk auto-enables Doppler (the physically honest default;
   // unchecking dop afterwards is the deliberate "naive colors" comparison)
@@ -746,16 +768,44 @@ async function main(){
   }, { passive: false });
 
   let frames = 0, fps = 0, t0 = performance.now(), lastLookNow = performance.now();
+  let lookYawVelocity = 0, lookPitchVelocity = 0;
+  const LOOK_RATE = 1.1, LOOK_TAP = 0.035;
+
+  function nudgeLook(key, amount){
+    if (key === "arrowleft") yaw += amount;
+    if (key === "arrowright") yaw -= amount;
+    if (key === "arrowup") pitch += amount;
+    if (key === "arrowdown") pitch -= amount;
+    pitch = Math.max(-1.55, Math.min(1.55, pitch));
+  }
+  function resetLookMotion(){
+    lookYawVelocity = 0; lookPitchVelocity = 0;
+    lastLookNow = performance.now();
+  }
+  function clearControls(){
+    keys.clear(); arrowPresses.clear(); resetLookMotion();
+  }
 
   function keyboardLook(){
     const now = performance.now();
-    const dt = Math.min(Math.max((now - lastLookNow) / 1000, 0), 0.05);
+    // A short cap guards against a tab waking after a pause.  The velocity
+    // ramp then keeps both the start and direction reversal visually smooth.
+    const dt = Math.min(Math.max((now - lastLookNow) / 1000, 0), 1 / 30);
     lastLookNow = now;
-    const rate = 1.4;  // rad / wall-clock second, independent of simulation speed
-    if (keys.has("arrowleft")) yaw += rate * dt;
-    if (keys.has("arrowright")) yaw -= rate * dt;
-    if (keys.has("arrowup")) pitch += rate * dt;
-    if (keys.has("arrowdown")) pitch -= rate * dt;
+    const targetYaw = LOOK_RATE * ((keys.has("arrowleft") ? 1 : 0) -
+                                   (keys.has("arrowright") ? 1 : 0));
+    const targetPitch = LOOK_RATE * ((keys.has("arrowup") ? 1 : 0) -
+                                     (keys.has("arrowdown") ? 1 : 0));
+    const blend = 1 - Math.exp(-24 * dt);
+    lookYawVelocity += (targetYaw - lookYawVelocity) * blend;
+    lookPitchVelocity += (targetPitch - lookPitchVelocity) * blend;
+    if (targetYaw || targetPitch) {
+      for (const key of ARROW_KEYS) {
+        if (keys.has(key)) arrowPresses.get(key).advanced = true;
+      }
+    }
+    yaw += lookYawVelocity * dt;
+    pitch += lookPitchVelocity * dt;
     pitch = Math.max(-1.55, Math.min(1.55, pitch));
   }
 
