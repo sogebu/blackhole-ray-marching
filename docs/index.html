@@ -310,9 +310,13 @@ void main(){
     if (uDisk && uR > R_DISK_MIN) {
       float A = 1.0 - 1.0 / uR;
       float b = uR * sqrt(max(1.0 - cSt * cSt, 0.0)) / sqrt(A);
+      // Radial axis = the camera's true world radial direction -aHat, never
+      // the world z axis: free flight moves the camera off the initial z ray
+      // while the disk plane stays world-fixed.  f64 reference and rotated-
+      // frame proof: disk.py crossing_geometry_general (r_hat = -aHat, e2 = p).
       float e2z = dot(p, uZd);
-      float mz = dot(cross(vec3(0.0, 0.0, 1.0), p), uZd);
-      float phi1 = mod(atan(-uZd.z, e2z), PI);
+      float mz = dot(cross(-aHat, p), uZd);
+      float phi1 = mod(atan(dot(aHat, uZd), e2z), PI);
       if (phi1 < 1e-6) phi1 = PI;
       bool ingoing = cSt > 0.0;
       for (int k = 0; k < 3; ++k) {
@@ -656,7 +660,7 @@ async function main(){
     const requestedR = sliderToR(parseFloat(el("R").value));
     if (requestedR < FLIGHT_MIN || requestedR > FLIGHT_MAX) {
       camera.active = false; el("free").checked = false;
-      camera.message = "自由飛行は R = 1.52–30 rS の外側で使えます";
+      camera.message = "自由飛行は R = 1.52–30 rS の範囲内で使えます";
       return false;
     }
     // Do not teleport the pilot.  The compensated static solution is stable
@@ -690,7 +694,7 @@ async function main(){
     const requestedR = camera.active ? camera.R : sliderToR(parseFloat(el("R").value));
     if (requestedR < FLIGHT_MIN || requestedR > FLIGHT_MAX) {
       camera.active = false; el("free").checked = false;
-      camera.message = "静止は R = 1.52–30 rS の外側で使えます";
+      camera.message = "静止は R = 1.52–30 rS の範囲内で使えます";
       return false;
     }
     falling = false; keys.clear(); camera.R = requestedR;
