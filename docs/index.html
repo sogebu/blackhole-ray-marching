@@ -486,7 +486,7 @@ async function main(){
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
   const FLIGHT_MIN = 1.52, FLIGHT_MAX = Math.min(29.95, Rmax);
   const FLIGHT_START_R = 8.0;
-  const FLIGHT_STEP = 0.02, THRUST = 0.25;
+  const FLIGHT_STEP = 0.02, PILOT_THRUST = 0.25;
 
   // The camera event has a true world position during free flight.  At rest
   // the retained rHat lets a player stop anywhere on an orbit without the
@@ -567,12 +567,28 @@ async function main(){
     if (keys.has("a") || keys.has("arrowleft")) v = sub(v, right);
     return norm(v) > 1e-12 ? unit(v) : null;
   }
-  function thrust(h, direction){
-    // Add proper velocity rather than clipping beta: the camera always remains
-    // subluminal even while a key is held at the fastest proper-time setting.
+  function altitudeHoldAcceleration(){
+    // Static-observer support plus the tangential centrifugal correction.
+    // It is outward at rest and exactly zero on a geodesic circular orbit.
+    const R = camera.R, A = 1 - 1 / R;
+    const beta = flightBeta(), b2 = dot3(beta, beta);
+    const betaR = dot3(beta, camera.rHat);
+    const betaT2 = Math.max(b2 - betaR * betaR, 0);
+    const magnitude = 1 / (1 - b2) / Math.sqrt(A)
+      * (1 / (2 * R * R) - A * betaT2 / R);
+    return scale(magnitude, camera.rHat);
+  }
+  function flightAcceleration(fwd, right){
+    const direction = thrustDirection(fwd, right);
+    return add(altitudeHoldAcceleration(),
+      direction ? scale(PILOT_THRUST, direction) : [0, 0, 0]);
+  }
+  function accelerate(h, acceleration){
+    // Add the hold and pilot accelerations to proper velocity rather than
+    // clipping beta: the camera remains subluminal at every update.
     const beta = flightBeta();
     const u = scale(1 / Math.sqrt(1 - dot3(beta, beta)), beta);
-    const uNext = add(u, scale(THRUST * h, direction));
+    const uNext = add(u, scale(h, acceleration));
     const betaNext = scale(1 / Math.sqrt(1 + dot3(uNext, uNext)), uNext);
     seedFlight(camera.R, betaNext);
   }
@@ -586,9 +602,11 @@ async function main(){
     // supply a large dtau, but no elapsed proper time is silently discarded.
     while (remain > 0 && camera.active) {
       const h = Math.min(FLIGHT_STEP, remain);
-      const direction = thrustDirection(fwd, right);
-      if (direction) thrust(h, direction);
+      // Symmetric half-kicks make the no-input static solution stable: the
+      // support acceleration cancels the geodesic fall without a one-step bias.
+      accelerate(.5 * h, flightAcceleration(fwd, right));
       if (!coast(h)) break;
+      accelerate(.5 * h, flightAcceleration(fwd, right));
       remain -= h;
     }
     el("R").value = RToSlider(camera.R);
@@ -596,15 +614,16 @@ async function main(){
   function startFreeFlight(){
     falling = false; el("fall").textContent = "▶ 自由落下";
     const requestedR = sliderToR(parseFloat(el("R").value));
-    // The viewer opens near the horizon for the falling-camera demo.  Starting
-    // a geodesic there from rest immediately plunges before the player can
-    // steer, so free flight starts on a safe, stable circular orbit instead.
+    // The viewer opens near the horizon for the falling-camera demo.  Powered
+    // flight starts at a safe radius and the hold acceleration then keeps the
+    // camera stationary until the player supplies an additional acceleration.
     camera.R = requestedR > 3.0 ? clamp(requestedR, FLIGHT_MIN, FLIGHT_MAX) : FLIGHT_START_R;
-    circularize(viewBasis().right);
-    camera.lastNow = performance.now();
+    seedFlight(camera.R, [0, 0, 0]);
+    camera.active = true; camera.lastNow = performance.now();
     camera.message = requestedR > 3.0
-      ? "自由飛行を円軌道から開始"
-      : "自由飛行は安全な R = 8 rS の円軌道から開始";
+      ? "自由飛行を静止から開始（重力補償中）"
+      : "自由飛行は安全な R = 8 rS の静止から開始（重力補償中）";
+    el("ffo").checked = false; el("free").checked = true;
   }
   function circularize(right){
     camera.R = clamp(camera.R, FLIGHT_MIN, FLIGHT_MAX);
@@ -622,11 +641,12 @@ async function main(){
     el("ffo").checked = false; el("free").checked = true;
   }
   function hover(){
-    falling = false; camera.active = false; keys.clear();
-    camera.E = Math.sqrt(Math.max(1 - 1 / camera.R, 0)); camera.L = 0; camera.rd = 0;
-    camera.hHat = fallbackNormal(camera.rHat); camera.message = "静止カメラ";
+    falling = false; keys.clear();
+    seedFlight(camera.R, [0, 0, 0]);
+    camera.active = true; camera.lastNow = performance.now();
+    camera.message = "静止（重力補償中）";
     el("fall").textContent = "▶ 自由落下"; el("ffo").checked = false;
-    el("free").checked = false;
+    el("free").checked = true;
   }
 
   // ---- real-time free fall: r(tau) = (R0^{3/2} - (3/2) tau)^{2/3}
