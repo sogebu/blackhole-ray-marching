@@ -488,7 +488,6 @@ async function main(){
   const unit = a => scale(1 / Math.max(norm(a), 1e-14), a);
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
   const FLIGHT_MIN = 1.52, FLIGHT_MAX = Math.min(29.95, Rmax);
-  const FLIGHT_START_R = 8.0;
   const FLIGHT_STEP = 0.02, PILOT_THRUST = 0.25;
 
   // The camera event has a true world position during free flight.  At rest
@@ -636,18 +635,21 @@ async function main(){
     el("R").value = RToSlider(camera.R);
   }
   function startFreeFlight(){
-    falling = false; el("fall").textContent = "▶ 自由落下";
     const requestedR = sliderToR(parseFloat(el("R").value));
-    // The viewer opens near the horizon for the falling-camera demo.  Powered
-    // flight starts at a safe radius and the hold acceleration then keeps the
-    // camera stationary until the player supplies an additional acceleration.
-    camera.R = requestedR > 3.0 ? clamp(requestedR, FLIGHT_MIN, FLIGHT_MAX) : FLIGHT_START_R;
+    if (requestedR < FLIGHT_MIN || requestedR > FLIGHT_MAX) {
+      camera.active = false; el("free").checked = false;
+      camera.message = "自由飛行は R = 1.52–30 rS の外側で使えます";
+      return false;
+    }
+    // Do not teleport the pilot.  The compensated static solution is stable
+    // throughout the table's exterior domain, including the default R = 1.83.
+    falling = false; el("fall").textContent = "▶ 自由落下";
+    camera.R = requestedR;
     seedFlight(camera.R, [0, 0, 0]);
     camera.active = true; camera.lastNow = performance.now();
-    camera.message = requestedR > 3.0
-      ? "自由飛行を静止から開始（重力補償中）"
-      : "自由飛行は安全な R = 8 rS の静止から開始（重力補償中）";
+    camera.message = "現在位置で自由飛行を開始（重力補償中）";
     el("ffo").checked = false; el("free").checked = true;
+    return true;
   }
   function circularize(right){
     camera.R = clamp(camera.R, FLIGHT_MIN, FLIGHT_MAX);
@@ -665,12 +667,19 @@ async function main(){
     el("ffo").checked = false; el("free").checked = true;
   }
   function hover(){
-    falling = false; keys.clear();
+    const requestedR = camera.active ? camera.R : sliderToR(parseFloat(el("R").value));
+    if (requestedR < FLIGHT_MIN || requestedR > FLIGHT_MAX) {
+      camera.active = false; el("free").checked = false;
+      camera.message = "静止は R = 1.52–30 rS の外側で使えます";
+      return false;
+    }
+    falling = false; keys.clear(); camera.R = requestedR;
     seedFlight(camera.R, [0, 0, 0]);
     camera.active = true; camera.lastNow = performance.now();
     camera.message = "静止（重力補償中）";
     el("fall").textContent = "▶ 自由落下"; el("ffo").checked = false;
     el("free").checked = true;
+    return true;
   }
 
   // ---- real-time free fall: r(tau) = (R0^{3/2} - (3/2) tau)^{2/3}
@@ -747,7 +756,7 @@ async function main(){
     }
     if (["w", "a", "s", "d"].includes(key)) {
       e.preventDefault();
-      if (!camera.active) startFreeFlight();
+      if (!camera.active && !startFreeFlight()) return;
       keys.add(key);
     }
   });
