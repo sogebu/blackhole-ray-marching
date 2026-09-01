@@ -801,7 +801,8 @@ async function main(){
     lookPitchVelocity += (targetPitch - lookPitchVelocity) * blend;
     if (targetYaw || targetPitch) {
       for (const key of ARROW_KEYS) {
-        if (keys.has(key)) arrowPresses.get(key).advanced = true;
+        const press = arrowPresses.get(key);
+        if (keys.has(key) && press) press.advanced = true;
       }
     }
     yaw += lookYawVelocity * dt;
