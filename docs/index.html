@@ -22,10 +22,10 @@
 <canvas id="gl" tabindex="0"></canvas>
 <div id="panel">
   <b>Schwarzschild viewer</b> <span class="note">(f32 lookup、horizon 貫通対応)</span>
-  <label>R = <span id="Rval"></span> r<sub>S</sub><br>
+  <label>R = <span id="Rval"></span> r<sub>S</sub> <span class="note">(スライダは 30 まで、飛行に上限なし)</span><br>
     <input id="R" type="range" min="0" max="1" step="any" value="0.55"></label>
   <label><input id="ffo" type="checkbox" checked> 自由落下カメラ (FFO)</label>
-  <label><input id="free" type="checkbox"> 自由飛行 <span class="note">(外部 R = 1.52&ndash;30 r<sub>S</sub>)</span></label>
+  <label><input id="free" type="checkbox"> 自由飛行 <span class="note">(外部 R &gt; 1.52 r<sub>S</sub>)</span></label>
   <label><button id="orbit">C: 円軌道</button> <button id="hover">0: 静止</button></label>
   <label><input id="dop" type="checkbox"> ドップラー効果 <span class="note">(色 + 明るさ g&#8308;)</span></label>
   <label><input id="eternal" type="checkbox"> 永久 BH <span class="note">(あの世 mode、現実の BH は崩壊型 = OFF)</span></label>
@@ -71,11 +71,13 @@ uniform float uNR, uNT, uLogRmin, uLogRmax, uT0, uBcr;
 uniform float uIntNR, uIntNChi;
 uniform float uDNY, uDNS, uDNV, uDY0, uDY1, uDZ0, uDZ1;
 uniform float uDVmax, uDW0, uDW1, uDBmax;
-uniform float uRin, uRout, uTmax, uExpo;
+uniform float uRin, uRout, uTmax, uExpo, uDiskRmax;
+uniform float uRref, uBsplit;        // far field: table end R_ref, table/turning split
 uniform vec3 uZd;                    // disk normal (world frame)
 uniform float uR, uTanHalf, uAspect;
 uniform vec3 uFwd, uRight, uUp, uBhat, uBeta;
 uniform bool uFFO, uFlying, uDop, uEternal, uDisk;   // uEternal: keep regions III/IV
+uniform bool uProbe;                 // machine check: output psi, not colour
 const float PI = 3.141592653589793;
 const float R_ENGINE_SWITCH = 1.10;   // below this: interior lookup engine
 const float R_DISK_MIN = 1.52;        // disk lookup: camera outside the
@@ -101,6 +103,92 @@ float edgeOf(float R){
   float A = 1.0 - 1.0 / R;
   float acr = asin(clamp(uBcr * sqrt(A) / R, 0.0, 1.0));
   return (R > 1.5) ? acr : PI - acr;
+}
+
+// ---- far field: camera R > uRref, where the psi table ends.  That end is a
+// texture boundary, not a physical one.  Python f64 reference = psi_far.py
+// (same scheme, same conditioning; its docstring derives both and the
+// export gate bounds this f32 port).  Phi(w1, w2) = int dw [1/b^2 - w^2 (1-w)]^-1/2
+// by 12-point Gauss-Legendre, (A) plain in w or (B) in t with w = w_p - t^2.
+const float GLX[6] = float[6](0.1252334085114689, 0.3678314989981802,
+  0.5873179542866175, 0.7699026741943047, 0.9041172563704748, 0.9815606342467192);
+const float GLW[6] = float[6](0.2491470458134027, 0.2334925365383546,
+  0.2031674267230656, 0.1600783285433461, 0.1069393259953189, 0.0471753363865120);
+
+float phiW(float ib2, float w1, float w2){
+  float c = 0.5 * (w1 + w2), h = 0.5 * (w2 - w1), s = 0.0;
+  for (int k = 0; k < 6; ++k) {
+    float wa = c - h * GLX[k], wb = c + h * GLX[k];
+    s += GLW[k] * (inversesqrt(max(ib2 - wa * wa * (1.0 - wa), 1e-30))
+                 + inversesqrt(max(ib2 - wb * wb * (1.0 - wb), 1e-30)));
+  }
+  return h * s;
+}
+// 1/b^2 - w^2 + w^3 = (w_p - w) Q(w): Q stays positive on the exterior branch
+float qOf(float wp, float w){ return (1.0 - wp) * (wp + w) - w * w; }
+float phiT(float wp, float tlo, float h){   // t in [tlo, tlo + 2h]
+  float c = tlo + h, s = 0.0;
+  for (int k = 0; k < 6; ++k) {
+    float ta = c - h * GLX[k], tb = c + h * GLX[k];
+    s += GLW[k] * (inversesqrt(max(qOf(wp, wp - ta * ta), 1e-30))
+                 + inversesqrt(max(qOf(wp, wp - tb * tb), 1e-30)));
+  }
+  return 2.0 * h * s;
+}
+// w_p = 1/periastron: monotone fixed point from 1/b (exact wherever (B) uses
+// it); -1 = no turning point.  No p^3 here: it overflows f32 at large b.
+float wPeri(float b){
+  if (b <= uBcr) return -1.0;
+  float ib2 = 1.0 / (b * b), w = 1.0 / b;
+  for (int k = 0; k < 12; ++k) w = sqrt(ib2 / (1.0 - w));
+  return w;
+}
+// the table's last row (R = uRref exactly), linear in t
+float psiRef(float chiRef){
+  float edge = edgeOf(uRref);
+  float t = sqrt(max(chiRef - edge, 0.0) / (PI - edge));
+  float ut = clamp((t - uT0) / (1.0 - uT0) * (uNT - 1.0), 0.0, uNT - 1.0001);
+  float j0 = floor(ut);
+  int j = int(j0), i = int(uNR) - 1;
+  return mix(texelFetch(uTab, ivec2(j, i), 0).r,
+             texelFetch(uTab, ivec2(j + 1, i), 0).r, ut - j0);
+}
+// c = cos(chi_st), s = sin(chi_st); the caller has excluded the shadow
+float psiFar(float R, float c, float s){
+  float w = 1.0 / R, A = 1.0 - w;
+  float b = R * s * inversesqrt(A);
+  float ib2 = 1.0 / (b * b);
+  float wp = wPeri(b);
+  // t_R = sqrt(w_p - w_R) from (w_p - w_R) Q(w_R) = w_R^2 A cot^2 chi: taken
+  // from cos(chi), never as a difference (sin chi = 1 in f32 near 90 deg)
+  float tR = (wp > 0.0)
+    ? w * sqrt(A) * abs(c) / (s * sqrt(max(qOf(wp, w), 1e-30))) : 0.0;
+  float wRef = 1.0 / uRref;
+  if (c > 0.0 && b <= uBsplit) {
+    // table branch: the ray reaches R_ref at chi_ref <= 41 deg; add the leg
+    float chiRef = asin(min(b * sqrt(1.0 - wRef) * wRef, 1.0));
+    float leg;
+    if (wp < 0.0 || wRef <= 0.5 * wp) leg = phiW(ib2, w, wRef);
+    else {
+      float tRef = sqrt(max(wp - wRef, 0.0));
+      leg = phiT(wp, tRef, 0.5 * (wRef - w) / (tR + tRef));
+    }
+    return psiRef(chiRef) + leg;
+  }
+  float phiOut;                                  // Phi(0, w_R)
+  if (wp < 0.0 || w <= 0.5 * wp) phiOut = phiW(ib2, 0.0, w);
+  else phiOut = phiT(wp, tR, 0.5 * w / (sqrt(wp) + tR));
+  if (c <= 0.0) return phiOut;                   // outgoing view
+  return phiOut + 2.0 * phiT(wp, 0.0, 0.5 * tR); // turning: + 2 Phi(w_R, w_p)
+}
+
+// machine-check channel: psi -> 24-bit fixed point over RGB (0 = shadow)
+vec4 encodePsi(float psi, bool dark){
+  if (dark) return vec4(0.0, 0.0, 0.0, 1.0);
+  float x = floor(clamp((psi + 1.0) / 16.0, 0.0, 0.99999994) * 16777216.0);
+  float r = floor(x / 65536.0); x -= r * 65536.0;
+  float g = floor(x / 256.0);
+  return vec4(r, g, x - g * 256.0, 255.0) / 255.0;
 }
 
 // interior engine: binary-search the non-uniform r grid, then same-fate
@@ -215,14 +303,29 @@ float periastron(float b){
   return p;
 }
 
+// A camera beyond uDiskRmax reads the A tables there and adds the azimuth the
+// orbit sweeps from uDiskRmax out to the camera: the sky's far-branch leg
+// (python reference = disk_table.far_leg).  Every disk ray (b <= 21,
+// periastron <= 20.5) passes uDiskRmax, so no camera radius is excluded.
+float diskLeg(float b, float wp){
+  if (uR <= uDiskRmax) return 0.0;
+  float w = 1.0 / uR, wc = 1.0 / uDiskRmax;
+  if (wp < 0.0 || wc <= 0.5 * wp) return phiW(1.0 / (b * b), w, wc);
+  float tR = sqrt(max(wp - w, 0.0)), tc = sqrt(max(wp - wc, 0.0));
+  return phiT(wp, tc, 0.5 * (wc - w) / (tR + tc));
+}
+
 // crossing radius at in-plane azimuth fk from the camera; 0 = no crossing
 float diskR(float b, bool ingoing, float fk){
   if (b > uDBmax) return 0.0;          // periastron beyond any disk edge
+  float Rt = min(uR, uDiskRmax);       // where the A tables are read
   if (b > uBcr) {
     float rowf = (log(max(b - uBcr, 1e-7)) - uDY0) / (uDY1 - uDY0) * (uDNY - 1.0);
     float at = auxFetch(rowf).y;
-    float v = sqrt(max(uR - periastron(b), 0.0));
-    float angCam = fetchBilin(uAS, rowf, v / uDVmax * (uDNV - 1.0), uDNY, uDNV);
+    float pr = periastron(b);
+    float v = sqrt(max(Rt - pr, 0.0));
+    float angCam = fetchBilin(uAS, rowf, v / uDVmax * (uDNV - 1.0), uDNY, uDNV)
+                 + diskLeg(b, 1.0 / pr);
     float ang = ingoing ? abs(angCam - fk) : angCam + fk;
     if (ang > at) return 0.0;
     float u = fetchBilin(uUS, rowf, ang / at * (uDNS - 1.0), uDNY, uDNS);
@@ -230,9 +333,9 @@ float diskR(float b, bool ingoing, float fk){
   }
   float rowf = (log(max(uBcr - b, 1e-7)) - uDZ0) / (uDZ1 - uDZ0) * (uDNY - 1.0);
   float at = auxFetch(rowf).z;
-  float w = log(max(uR - 1.0, 0.4));
+  float w = log(max(Rt - 1.0, 0.4));
   float angCam = fetchBilin(uAC, rowf, (w - uDW0) / (uDW1 - uDW0) * (uDNV - 1.0),
-                            uDNY, uDNV);
+                            uDNY, uDNV) + diskLeg(b, -1.0);
   float ang = ingoing ? angCam - fk : angCam + fk;
   if (ang < 0.0 || ang > at) return 0.0;   // < 0: inside the horizon already
   float u = fetchBilin(uUC, rowf, ang / at * (uDNS - 1.0), uDNY, uDNS);
@@ -303,13 +406,17 @@ void main(){
     float cSt = clamp(dot(dirSt, aHat), -1.0, 1.0);
     p = dirSt - aHat * cSt;                    // transverse direction is not
     pl = length(p);                             // boost-invariant in general
+    float sSt = pl;                             // sin(chi_st), full precision
     p = (pl > 1e-6) ? p / pl : vec3(1.0, 0.0, 0.0);
     // ---- accretion disk first: crossings can sit in front of the shadow.
     // b, phi_1, m_z all come from the STATIC-frame angle / the transverse
-    // direction p, both invariant under the radial FFO boost.
-    if (uDisk && uR > R_DISK_MIN) {
+    // direction p, both invariant under the radial FFO boost.  Any camera
+    // R > R_DISK_MIN: beyond uDiskRmax diskR adds the far leg.  b uses sSt,
+    // not sqrt(1 - c^2): from far away the disk sits within chi ~ 21/R of
+    // the hole, where 1 - c^2 loses its digits in f32.
+    if (uDisk && !uProbe && uR > R_DISK_MIN) {
       float A = 1.0 - 1.0 / uR;
-      float b = uR * sqrt(max(1.0 - cSt * cSt, 0.0)) / sqrt(A);
+      float b = uR * sSt / sqrt(A);
       // Radial axis = the camera's true world radial direction -aHat, never
       // the world z axis: free flight moves the camera off the initial z ray
       // while the disk plane stays world-fixed.  f64 reference and rotated-
@@ -340,15 +447,23 @@ void main(){
         }
       }
     }
-    float chiSt = acos(cSt);
-    float edge = edgeOf(uR);
-    if (chiSt <= edge) fate = 0;
-    else {
-      float t = sqrt((chiSt - edge) / (PI - edge));
-      psi = psiLookup(uR, t);
-      g = 1.0 / (sqrt(1.0 - 1.0 / uR) * gam * (1.0 - bd));
+    if (uR > uRref) {
+      // beyond the table: shadow iff ingoing with b <= b_cr (= chi <= edge)
+      float bF = uR * sSt * inversesqrt(1.0 - 1.0 / uR);
+      if (cSt > 0.0 && bF <= uBcr) fate = 0;
+      else psi = psiFar(uR, cSt, sSt);
+    } else {
+      float chiSt = acos(cSt);
+      float edge = edgeOf(uR);
+      if (chiSt <= edge) fate = 0;
+      else {
+        float t = sqrt((chiSt - edge) / (PI - edge));
+        psi = psiLookup(uR, t);
+      }
     }
+    if (fate != 0) g = 1.0 / (sqrt(1.0 - 1.0 / uR) * gam * (1.0 - bd));
   }
+  if (uProbe) { frag = encodePsi(psi, fate == 0); return; }
   if (fate == 0) { frag = vec4(0.0, 0.0, 0.0, 1.0); return; }
 
   vec3 sky = -cos(psi) * aHat + sin(psi) * p;
@@ -465,6 +580,9 @@ async function main(){
   gl.uniform1f(U("uRout"), 12.0);
   gl.uniform1f(U("uTmax"), 7000.0);
   gl.uniform1f(U("uExpo"), 3.0);
+  gl.uniform1f(U("uDiskRmax"), meta.disk_R_cam_max);
+  gl.uniform1f(U("uRref"), meta.R_max);
+  gl.uniform1f(U("uBsplit"), meta.far_b_split);
 
   // ---- camera state (R range now crosses the horizon down to 0.06)
   let yaw = 0, pitch = 0, fov = 100;
@@ -496,13 +614,20 @@ async function main(){
   const norm = a => Math.hypot(...a);
   const unit = a => scale(1 / Math.max(norm(a), 1e-14), a);
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
-  const FLIGHT_MIN = 1.52, FLIGHT_MAX = Math.min(29.95, Rmax);
+  // Free flight has an inner limit only.  R_max (30) is where the psi table
+  // ends; beyond it the shader's far branch (psi_far.py) continues the exact
+  // map, so the exterior has no upper bound.  The R slider stays finite: it
+  // is the UI for picking a start radius, never a clamp on the camera.
+  const FLIGHT_MIN = 1.52;
   const FLIGHT_STEP = 0.02, FLIGHT_FRAME_BUDGET = 0.04;
   const PILOT_THRUST = 0.25, FLIGHT_DAMPING = 1.6;
+  const setSliderFromR = R => { el("R").value = clamp(RToSlider(R), 0, 1); };
 
   // The camera event has a true world position during free flight.  At rest
   // the retained rHat lets a player stop anywhere on an orbit without the
   // old radius slider snapping the world back to its initial z-axis ray.
+  // camera.R is the authoritative radius; the slider only writes it when the
+  // user moves the slider (input event), so R > R_max survives a pause.
   const camera = {
     R: sliderToR(parseFloat(el("R").value)), rHat: [0, 0, 1], hHat: [0, 1, 0],
     E: 0, L: 0, rd: 0, active: false, lastNow: performance.now(),
@@ -542,7 +667,7 @@ async function main(){
     return unit(cross(rHat, trial));
   }
   function seedFlight(R, beta){
-    R = clamp(R, FLIGHT_MIN, FLIGHT_MAX);
+    R = Math.max(R, FLIGHT_MIN);
     const b2 = dot3(beta, beta);
     if (b2 >= 1) beta = scale(.999999 / Math.sqrt(b2), beta);
     const gam = 1 / Math.sqrt(1 - dot3(beta, beta));
@@ -581,13 +706,11 @@ async function main(){
     const Rnext = R + h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]);
     const rdNext = rd + h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
     const dPhi = h / 6 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
-    if (Rnext <= FLIGHT_MIN || Rnext >= FLIGHT_MAX) {
-      camera.R = clamp(Rnext, FLIGHT_MIN, FLIGHT_MAX);
+    if (Rnext <= FLIGHT_MIN) {
+      camera.R = FLIGHT_MIN;
       camera.active = false; camera.timeDebt = 0;
       el("free").checked = false; el("ffo").checked = false;
-      camera.message = Rnext <= FLIGHT_MIN
-        ? "自由飛行は R = 1.52 rS で停止（内側は放射 FFO mode の領域）"
-        : "自由飛行は table 上限 R = 30 rS で停止";
+      camera.message = "自由飛行は R = 1.52 rS で停止（内側は放射 FFO mode の領域）";
       return false;
     }
     camera.R = Rnext; camera.rd = rdNext;
@@ -638,12 +761,17 @@ async function main(){
     if (!camera.active) return;
     const now = performance.now();
     const speed = 0.2 * Math.pow(100, parseFloat(el("spd").value));
-    camera.timeDebt += Math.max(0, (now - camera.lastNow) / 1000 * speed);
+    const dtWall = Math.max(0, (now - camera.lastNow) / 1000);
+    camera.timeDebt += dtWall * speed;
     camera.lastNow = now;
     // Never discard elapsed proper time, but repay a long background/frame
     // stall over later frames so a single delayed render cannot look like a
-    // teleport.  Normal 60 fps updates fit inside this budget.
-    let remain = Math.min(camera.timeDebt, FLIGHT_FRAME_BUDGET);
+    // teleport.  The budget is 1.5x one frame (at most 50 ms of wall time) at
+    // the chosen time rate, so every rate keeps up at normal frame rates.  A
+    // fixed 0.04 used to cap flight at 2.4 rS/c per second whatever the
+    // slider said, which left R >> 30 out of practical reach.
+    let remain = Math.min(camera.timeDebt,
+      Math.max(FLIGHT_FRAME_BUDGET, 1.5 * speed * Math.min(dtWall, 0.05)));
     camera.timeDebt -= remain;
     while (remain > 0 && camera.active) {
       const h = Math.min(FLIGHT_STEP, remain);
@@ -654,13 +782,13 @@ async function main(){
       accelerate(.5 * h, flightAcceleration(fwd, right));
       remain -= h;
     }
-    el("R").value = RToSlider(camera.R);
+    setSliderFromR(camera.R);                  // display only; pinned past R_max
   }
   function startFreeFlight(){
-    const requestedR = sliderToR(parseFloat(el("R").value));
-    if (requestedR < FLIGHT_MIN || requestedR > FLIGHT_MAX) {
+    const requestedR = camera.R;
+    if (requestedR < FLIGHT_MIN) {
       camera.active = false; el("free").checked = false;
-      camera.message = "自由飛行は R = 1.52–30 rS の範囲内で使えます";
+      camera.message = "自由飛行は R > 1.52 rS で使えます";
       return false;
     }
     // Do not teleport the pilot.  The compensated static solution is stable
@@ -675,7 +803,6 @@ async function main(){
     return true;
   }
   function circularize(right){
-    camera.R = clamp(camera.R, FLIGHT_MIN, FLIGHT_MAX);
     if (camera.R <= 3.0) {
       camera.message = "C の安定円軌道は R > 3 rS で使えます";
       return;
@@ -688,13 +815,14 @@ async function main(){
     seedFlight(camera.R, scale(beta, tHat));
     camera.active = true; camera.lastNow = performance.now();
     camera.timeDebt = 0; camera.orbitLock = true; camera.message = "円軌道に入りました";
+    falling = false; el("fall").textContent = "▶ 自由落下";   // an orbit ends a fall
     el("ffo").checked = false; el("free").checked = true;
   }
   function hover(){
-    const requestedR = camera.active ? camera.R : sliderToR(parseFloat(el("R").value));
-    if (requestedR < FLIGHT_MIN || requestedR > FLIGHT_MAX) {
+    const requestedR = camera.R;
+    if (requestedR < FLIGHT_MIN) {
       camera.active = false; el("free").checked = false;
-      camera.message = "静止は R = 1.52–30 rS の範囲内で使えます";
+      camera.message = "静止は R > 1.52 rS で使えます";
       return false;
     }
     falling = false; keys.clear(); camera.R = requestedR;
@@ -712,8 +840,8 @@ async function main(){
   let falling = false, fallR32 = 0, fallT0 = 0;
   el("fall").addEventListener("click", () => {
     if (falling) { falling = false; el("fall").textContent = "▶ 自由落下"; return; }
-    const R = sliderToR(parseFloat(el("R").value));
-    camera.active = false; el("free").checked = false; camera.R = R;
+    const R = camera.R;                        // fall from where the camera is
+    camera.active = false; el("free").checked = false;
     camera.message = "";
     fallR32 = Math.pow(R, 1.5);
     fallT0 = performance.now();
@@ -736,10 +864,17 @@ async function main(){
       camera.R = Rmin;
       return;
     }
-    el("R").value = RToSlider(R);
+    setSliderFromR(R);
     camera.R = R;
   }
 
+  // The slider moves the camera only while it is idle; during flight or a
+  // fall the slider is a display the integrator overwrites.
+  el("R").addEventListener("input", () => {
+    if (camera.active || falling) return;
+    camera.R = sliderToR(parseFloat(el("R").value));
+    camera.message = "";
+  });
   el("free").addEventListener("change", () => {
     if (el("free").checked) startFreeFlight();
     else {
@@ -747,10 +882,7 @@ async function main(){
       camera.message = "自由飛行を一時停止";
     }
   });
-  el("orbit").addEventListener("click", () => {
-    if (!camera.active) camera.R = sliderToR(parseFloat(el("R").value));
-    circularize(viewBasis().right);
-  });
+  el("orbit").addEventListener("click", () => circularize(viewBasis().right));
   el("hover").addEventListener("click", hover);
   const ARROW_KEYS = new Set(["arrowup", "arrowdown", "arrowleft", "arrowright"]);
   // A key tap can begin and end between animation frames.  Record it so that
@@ -765,7 +897,6 @@ async function main(){
     if (key === "0") { e.preventDefault(); hover(); return; }
     if (key === "c") {
       e.preventDefault();
-      if (!camera.active) camera.R = sliderToR(parseFloat(el("R").value));
       circularize(viewBasis().right);
       return;
     }
@@ -825,6 +956,7 @@ async function main(){
   }, { passive: false });
 
   let frames = 0, fps = 0, t0 = performance.now(), lastLookNow = performance.now();
+  let lastBeta = [0, 0, 0];               // the boost the last draw used
   let lookYawVelocity = 0, lookPitchVelocity = 0;
   const LOOK_RATE = 1.1, LOOK_TAP = 0.035;
 
@@ -879,8 +1011,49 @@ async function main(){
       draw(true);
       return out;
     },
+    // probe(o, n): pin state o, draw psi (not colour) through the same
+    // shader path, read an n x n grid of pixels plus the centre row (GL
+    // origin bottom-left), restore.  Returns the camera (R, aHat, beta, view
+    // basis, tanHalf, canvas size) and [x, y, psi|null] per pixel, so the
+    // f64 checker (check_probe.py) rebuilds each pixel-centre direction and
+    // recomputes psi with the f64 reference (psi_far.py / psi_table.py).
+    probe(o, n = 12){
+      const saved = this.state();
+      this.set(o);
+      gl.disable(gl.DITHER);
+      gl.uniform1i(U("uProbe"), 1);
+      draw(true);
+      const w = canvas.width, h = canvas.height;
+      const pts = [];
+      for (let i = 0; i < n; i++)
+        for (let j = 0; j < n; j++)
+          pts.push([Math.floor((i + .5) / n * w), Math.floor((j + .5) / n * h)]);
+      for (let i = 0; i < 5 * n; i++)
+        pts.push([Math.floor((i + .5) / (5 * n) * w), Math.floor(h / 2)]);
+      const px = new Uint8Array(4);
+      const s = pts.map(([x, y]) => {
+        gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        const v = (px[0] * 65536 + px[1] * 256 + px[2]) / 16777216;
+        return [x, y, v === 0 ? null : +(16 * v - 1).toFixed(7)];
+      });
+      const b = viewBasis();
+      const out = { w, h, R: camera.R, aHat: scale(-1, camera.rHat),
+                    beta: [...lastBeta], fwd: b.fwd, right: b.right, up: b.up,
+                    tanHalf: Math.tan(parseFloat(el("fov").value) * Math.PI / 360),
+                    s };
+      gl.uniform1i(U("uProbe"), 0);
+      gl.enable(gl.DITHER);
+      this.set(saved);
+      draw(true);
+      return out;
+    },
     set(o){
-      if (o.Rslider !== undefined) el("R").value = o.Rslider;
+      if (o.Rslider !== undefined) {
+        el("R").value = o.Rslider;
+        camera.R = sliderToR(parseFloat(el("R").value));
+      }
+      if (o.R !== undefined) { camera.R = o.R; setSliderFromR(o.R); }
+      if (o.rHat !== undefined) camera.rHat = unit(o.rHat);
       if (o.ffo !== undefined) el("ffo").checked = o.ffo;
       if (o.dop !== undefined) el("dop").checked = o.dop;
       if (o.eternal !== undefined) el("eternal").checked = o.eternal;
@@ -896,7 +1069,8 @@ async function main(){
       if (o.yaw !== undefined) yaw = o.yaw;
       if (o.pitch !== undefined) pitch = o.pitch;
     },
-    state(){ return { Rslider: el("R").value, yaw, pitch,
+    state(){ return { Rslider: el("R").value, R: camera.R, rHat: [...camera.rHat],
+                      yaw, pitch,
                       fov: el("fov").value, ffo: el("ffo").checked,
                       dop: el("dop").checked, eternal: el("eternal").checked,
                       disk: el("disk").checked, inc: el("inc").value,
@@ -935,19 +1109,20 @@ async function main(){
     if (once !== true) keyboardLook();
     fov = parseFloat(el("fov").value);
     const basis = viewBasis();
-    if (camera.active) flightStep(basis.fwd, basis.right);
-    else {
-      fallStep();
-      if (!falling) camera.R = sliderToR(parseFloat(el("R").value));
+    // a verification draw (once) pins the scene: it never advances time
+    if (once !== true) {
+      if (camera.active) flightStep(basis.fwd, basis.right);
+      else fallStep();
     }
     const R = camera.R;
     el("spdval").textContent = (0.2 * Math.pow(100, parseFloat(el("spd").value))).toFixed(1) + " rS/c 毎秒";
-    el("Rval").textContent = R.toFixed(2);
+    el("Rval").textContent = R < 1e4 ? R.toFixed(2) : R.toExponential(3);
     el("fovval").textContent = fov.toFixed(0);
 
     const aHat = scale(-1, camera.rHat);
     const betaVec = camera.active ? flightBeta()
       : ((el("ffo").checked && R > 1.0) ? scale(Math.sqrt(1 / R), aHat) : [0, 0, 0]);
+    lastBeta = betaVec;
 
     gl.uniform1f(U("uR"), R);
     gl.uniform1f(U("uTanHalf"), Math.tan(fov * Math.PI / 360));
@@ -975,12 +1150,12 @@ async function main(){
     const tauHor = 2 / 3 * (Math.pow(R, 1.5) - 1);
     const betaMag = norm(betaVec);
     const hudPre = camera.active
-      ? `自由飛行   R = ${R.toFixed(2)} rS   |beta| = ${betaMag.toFixed(3)}   ` +
+      ? `自由飛行   R = ${el("Rval").textContent} rS   |beta| = ${betaMag.toFixed(3)}   ` +
         `E = ${camera.E.toFixed(4)}   L = ${camera.L.toFixed(4)}   `
       : R < 1.0
       ? `r = ${R.toFixed(3)} rS   ⚫ inside the horizon   ` +
         `tau to singularity = ${tauIn.toFixed(2)} rS/c (${fmtSec(tauIn * rsSec)})   `
-      : `R = ${R.toFixed(2)} rS   beta = ` +
+      : `R = ${el("Rval").textContent} rS   beta = ` +
         `${betaMag.toFixed(3)}   ` +
         `tau to horizon = ${tauHor.toFixed(2)} rS/c (${fmtSec(tauHor * rsSec)})   `;
     const diskNote = (el("disk").checked && R <= 1.52)
