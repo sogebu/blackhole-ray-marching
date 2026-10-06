@@ -1,0 +1,11 @@
+sky_milkyway.jpg — all-sky Milky Way image used by the photo-sky option
+
+Original: "Milkyway360-latlon-32kscaled8k-4200k-m14-s4-g1.png"
+  by Kevin M. Loch (Wikimedia Commons user Kevinmloch), rendered with
+  bsrender (https://github.com/kevinloch/bsrender) from ESA Gaia EDR3 data.
+  https://commons.wikimedia.org/wiki/File:Milkyway360-latlon-32kscaled8k-4200k-m14-s4-g1.png
+License: Creative Commons Attribution-ShareAlike 4.0 International
+  https://creativecommons.org/licenses/by-sa/4.0/
+  This file (and only this file) is distributed under the same license.
+Changes: alpha channel dropped; downscaled from 8000 x 4000 to 4096 x 2048
+  in linear light (Lanczos); saved as JPEG (quality 90).

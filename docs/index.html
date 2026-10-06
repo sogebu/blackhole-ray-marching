@@ -16,6 +16,8 @@
          font-variant-numeric: tabular-nums; }
   input[type=range] { width: 190px; vertical-align: middle; }
   .note { color: #8a93a6; font-size: 11px; }
+  .note a { color: #a9b8d6; }
+  #skycredit { max-width: 360px; margin: 0 0 4px; }
 </style>
 </head>
 <body>
@@ -37,6 +39,15 @@
       <option value="SgrA" selected>Sgr A*</option>
       <option value="M87">M87*</option>
     </select> <span class="note">(時間の秒換算のみ、絵は不変)</span></label>
+  <label>空 <select id="sky">
+      <option value="milkyway" selected>天の川 (Gaia の実データ)</option>
+      <option value="grid">格子 (15&deg; ごと)</option>
+    </select> <span id="skynote" class="note"></span></label>
+  <div id="skycredit" class="note">天の川の画像:
+    <a href="https://commons.wikimedia.org/wiki/File:Milkyway360-latlon-32kscaled8k-4200k-m14-s4-g1.png" target="_blank" rel="noopener">Kevin M. Loch</a>
+    (bsrender、ESA Gaia EDR3)、
+    <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener">CC BY-SA 4.0</a>、
+    縮小して使用。銀河中心が初期視点の BH の真後ろ。</div>
   <label>fov <span id="fovval"></span>&deg;
     <input id="fov" type="range" min="30" max="150" step="1" value="100"></label>
   <label><button id="fall">▶ 自由落下</button>
@@ -78,8 +89,12 @@ uniform float uR, uTanHalf, uAspect;
 uniform vec3 uFwd, uRight, uUp, uBhat, uBeta;
 uniform bool uFFO, uFlying, uDop, uEternal, uDisk;   // uEternal: keep regions III/IV
 uniform bool uProbe;                 // machine check: output psi, not colour
+uniform sampler2D uSkyImg;           // photo sky (equirectangular, galactic)
+uniform bool uSkyImage;              // true: photo sky, false: 15-deg grid
+uniform float uSkyW;                 // photo sky width in texels (mip level 0)
 const float PI = 3.141592653589793;
-const float R_ENGINE_SWITCH = 1.10;   // below this: interior lookup engine
+uniform float uEngineR;              // falling camera: interior engine below this
+                                     // radius = the psi table's R_min (meta)
 const float R_DISK_MIN = 1.52;        // disk lookup: camera outside the
                                       // photon sphere (disk_table.py scope)
 const vec3 SKY_NORTH = vec3(0.0, 0.0, 1.0);  // fixed celestial coordinate frame
@@ -349,7 +364,13 @@ float diskT(float r){
   return uTmax * pow(f4, 0.25);
 }
 
-vec3 skyColor(float th, float ph){
+vec3 skyGrid(vec3 s){
+  // The graticule labels positions on one fixed celestial sphere.  Using
+  // aHat for latitude while using world x/y for longitude mixed two frames:
+  // it happened to agree on the initial z axis but became contradictory once
+  // the camera translated.  Both angles now use the same fixed world frame.
+  float th = acos(clamp(dot(s, SKY_NORTH), -1.0, 1.0));
+  float ph = atan(s.y, s.x);
   float td = degrees(th);
   float pd = degrees(mod(ph, 2.0 * PI));
   float checker = mod(floor(td / 15.0) + floor(pd / 15.0), 2.0);
@@ -362,11 +383,29 @@ vec3 skyColor(float th, float ph){
   return c;
 }
 
-// far universe: warm counterpart (R/B swap) of render_interior.sky_color_III.
-// The web sky has no north-pole marker, so the offline renderers' orange
-// marker retint has nothing to act on here.
-vec3 skyColorIII(float th, float ph){
-  return skyColor(th, ph).bgr;
+// Photo sky: an equirectangular all-sky image in galactic coordinates
+// (l = 0 at the image centre, l growing to the left, b = +90 deg at the top;
+// source and license: export_sky.py / sky_milkyway.txt).  The galactic frame
+// is pinned to the world frame so that the initial view (camera on +z looking
+// at the hole along -z, screen up +y, screen right +x) has the Galactic
+// Centre straight behind the hole and galactic north up.  GAL_L90 =
+// GAL_N x GAL_C keeps the frame right-handed (l = 90 deg on screen left, as
+// seen from inside the sphere).
+const vec3 GAL_C = vec3(0.0, 0.0, -1.0);    // (l, b) = (0, 0)
+const vec3 GAL_L90 = vec3(-1.0, 0.0, 0.0);  // (90 deg, 0)
+const vec3 GAL_N = vec3(0.0, 1.0, 0.0);     // b = +90 deg
+vec3 skyImage(vec3 s){
+  float l = atan(dot(s, GAL_L90), dot(s, GAL_C));
+  float b = asin(clamp(dot(s, GAL_N), -1.0, 1.0));
+  vec2 uv = vec2(0.5 - l / (2.0 * PI), 0.5 - b / PI);
+  // Explicit mip level from this pixel's angular footprint on the sky.  The
+  // derivatives of the unit vector s are continuous across the l = 180 deg
+  // seam, unlike those of uv.x; near the photon ring the footprint grows
+  // without bound and the lookup tends to the mean sky, as it should.
+  float foot = max(length(dFdx(s)), length(dFdy(s)));
+  float lod = log2(max(foot * uSkyW / (2.0 * PI), 1e-6));
+  lod = isnan(lod) ? 0.0 : clamp(lod, 0.0, 13.0);
+  return textureLod(uSkyImg, uv, lod).rgb;
 }
 
 void main(){
@@ -378,10 +417,19 @@ void main(){
   float pl = length(p);
   p = (pl > 1e-6) ? p / pl : vec3(1.0, 0.0, 0.0);
 
-  float psi; float g = 1.0; int fate = 1;
-  if (uR < R_ENGINE_SWITCH) {
-    // interior/near-horizon engine (always the FFO frame; static observers
-    // do not exist below the horizon)
+  float psi = 0.0; float g = 1.0; int fate = 1;
+  bool diskHit = false; vec3 diskCol = vec3(0.0);
+  // Engine choice.  The interior lookup knows only the falling (FFO) frame,
+  // so it is used inside the horizon (no static observer exists there) and
+  // for a falling camera below the psi table's lower end uEngineR.  A static
+  // camera outside the horizon always uses the exterior engine (below
+  // uEngineR its psi row is the table's last one).  Measured against f64 at
+  // R = 1.02-1.09, facing the hole: exterior median 2e-6 rad, interior
+  // 2e-4 with up to ~1 rad at the shadow edge (DESIGN.md "R = 1.1 の
+  // engine 切替").
+  bool interior = uR <= 1.0 || (uFFO && uR < uEngineR);
+  if (interior) {
+    // interior/near-horizon engine (always the FFO frame)
     float chi = acos(cCam);
     vec3 v = intLookup(uR, chi);
     psi = v.x; g = v.y; fate = int(v.z + 0.5);
@@ -438,10 +486,10 @@ void main(){
           // the whole g^4 beaming (no separate factor: that would double it)
           float Tobs = clamp((uDop ? gd : 1.0) * diskT(r), 300.0, 4.0e4);
           float inten = uExpo * pow(Tobs / uTmax, 4.0);
-          vec3 dc = vec3(bbR(Tobs), bbG(Tobs), bbB(Tobs)) / 255.0
+          diskCol = vec3(bbR(Tobs), bbG(Tobs), bbB(Tobs)) / 255.0
                     * (inten / (1.0 + inten));
-          frag = vec4(dc, 1.0);
-          return;
+          diskHit = true;
+          break;
         }
       }
     }
@@ -462,18 +510,21 @@ void main(){
     if (fate != 0) g = 1.0 / (sqrt(1.0 - 1.0 / uR) * gam * (1.0 - bd));
   }
   if (uProbe) { frag = encodePsi(psi, fate == 0); return; }
+
+  // The sky is looked up for every pixel before the disk / shadow selection
+  // below: the photo sky takes screen-space derivatives, which GLSL ES 3.00
+  // leaves undefined after a divergent return.  Shadow pixels carry psi = 0;
+  // that only enlarges the footprint (a blurrier texel) of their neighbours
+  // right at the shadow edge.
+  float psiS = (fate == 0 || isnan(psi)) ? 0.0 : psi;
+  vec3 sky = -cos(psiS) * aHat + sin(psiS) * p;
+  vec3 col = uSkyImage ? skyImage(sky) : skyGrid(sky);
+  // far universe: warm counterpart (R/B swap) of render_interior.sky_color_III
+  // (the offline renderers' orange marker retint has no web counterpart)
+  if (fate == 3) col = col.bgr;
+  if (diskHit) { frag = vec4(diskCol, 1.0); return; }
   if (fate == 0) { frag = vec4(0.0, 0.0, 0.0, 1.0); return; }
-
-  vec3 sky = -cos(psi) * aHat + sin(psi) * p;
-  // The graticule labels positions on one fixed celestial sphere.  Using
-  // aHat for latitude while using world x/y for longitude mixed two frames:
-  // it happened to agree on the initial z axis but became contradictory once
-  // the camera translated.  Both angles now use the same fixed world frame.
-  float th = acos(clamp(dot(sky, SKY_NORTH), -1.0, 1.0));
-  float ph = atan(sky.y, sky.x);
-
-  vec3 col = (fate == 3) ? skyColorIII(th, ph) : skyColor(th, ph);
-  if (uDop && (uFFO || uFlying || uR < R_ENGINE_SWITCH)) {
+  if (uDop && (uFFO || uFlying || interior)) {
     col = dopplerShift(col, g);       // chroma (Nakayama-Oda Sec. 5.4)
     col *= pow(g, 4.0);               // bolometric beaming
     col = col / (1.0 + col);          // Reinhard
@@ -581,6 +632,61 @@ async function main(){
   gl.uniform1f(U("uDiskRmax"), meta.disk_R_cam_max);
   gl.uniform1f(U("uRref"), meta.R_max);
   gl.uniform1f(U("uBsplit"), meta.far_b_split);
+  gl.uniform1f(U("uEngineR"), meta.R_min);
+
+  // ---- photo sky (the default sky): fetched at start-up, or the first time
+  // it is selected (2.9 MB), mipmapped.  Until it is ready the grid stays on.  Unit 8 holds a 1x1 black texel so
+  // the sampler is always complete.
+  const skyTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE8);
+  gl.bindTexture(gl.TEXTURE_2D, skyTex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE,
+                new Uint8Array([0, 0, 0, 255]));
+  gl.activeTexture(gl.TEXTURE0);
+  gl.uniform1i(U("uSkyImg"), 8);
+  let skyState = "none";           // none | loading | ready | failed
+  let skyLoaded = null;            // resolves when the image is on the GPU
+  function loadSky(){
+    if (skyLoaded) return skyLoaded;
+    skyState = "loading";
+    skyLoaded = new Promise(resolve => {
+      const img = new Image();
+      img.onload = () => {
+        // Devices whose texture limit is below the image width get a
+        // downscaled copy (WebGL2 only guarantees 2048).
+        const max = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+        let src = img;
+        if (img.naturalWidth > max) {
+          src = document.createElement("canvas");
+          src.width = max; src.height = max / 2;
+          src.getContext("2d").drawImage(img, 0, 0, max, max / 2);
+        }
+        gl.activeTexture(gl.TEXTURE8);
+        gl.bindTexture(gl.TEXTURE_2D, skyTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, src);
+        gl.generateMipmap(gl.TEXTURE_2D);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.uniform1f(U("uSkyW"), src.width);
+        skyState = "ready"; updateSky(); resolve(true);
+      };
+      img.onerror = () => { skyState = "failed"; updateSky(); resolve(false); };
+      img.src = "sky_milkyway.jpg";
+    });
+    updateSky();
+    return skyLoaded;
+  }
+  function updateSky(){
+    const want = el("sky").value === "milkyway";
+    if (want && skyState === "none") loadSky();
+    el("skycredit").hidden = !want;
+    el("skynote").textContent = !want ? ""
+      : skyState === "loading" ? "読み込み中…"
+      : skyState === "failed" ? "画像を読み込めませんでした" : "";
+  }
 
   // ---- camera state (R range now crosses the horizon down to 0.06)
   let yaw = 0, pitch = 0, fov = 100;
@@ -930,6 +1036,8 @@ async function main(){
 
   // enabling the disk auto-enables Doppler (the physically honest default;
   // unchecking dop afterwards is the deliberate "naive colors" comparison)
+  el("sky").addEventListener("change", () => { updateSky(); canvas.focus(); });
+  updateSky();                         // default = photo sky: start loading now
   el("disk").addEventListener("change", () => {
     if (el("disk").checked) el("dop").checked = true;
   });
@@ -1003,6 +1111,9 @@ async function main(){
   // verification notes, not in this payload.
   window.__bh = {
     drawOnce(){ draw(true); },
+    // skyReady(): resolves once the photo sky is on the GPU (loads it if
+    // needed), so a check can select it and wait before snap/probe.
+    skyReady(){ return loadSky(); },
     snap(o){
       const saved = this.state();
       this.set(o);
@@ -1059,6 +1170,7 @@ async function main(){
       if (o.dop !== undefined) el("dop").checked = o.dop;
       if (o.eternal !== undefined) el("eternal").checked = o.eternal;
       if (o.disk !== undefined) el("disk").checked = o.disk;
+      if (o.sky !== undefined) { el("sky").value = o.sky; updateSky(); }
       if (o.inc !== undefined) el("inc").value = o.inc;
       if (o.mass !== undefined) el("mass").value = o.mass;
       if (o.fov !== undefined) el("fov").value = o.fov;
@@ -1076,6 +1188,7 @@ async function main(){
                       dop: el("dop").checked, eternal: el("eternal").checked,
                       disk: el("disk").checked, inc: el("inc").value,
                       mass: el("mass").value,
+                      sky: el("sky").value,
                       viewFwd: [...view.fwd], viewUp: [...view.up] }; },
     // scan(): the right half of the centre row, read through the psi channel
     // (same encoding as probe), not through colour.  Returns the shadow edge
@@ -1158,6 +1271,8 @@ async function main(){
     gl.uniform1i(U("uDop"), el("dop").checked ? 1 : 0);
     gl.uniform1i(U("uEternal"), el("eternal").checked ? 1 : 0);
     gl.uniform1i(U("uDisk"), el("disk").checked ? 1 : 0);
+    gl.uniform1i(U("uSkyImage"),
+                 (el("sky").value === "milkyway" && skyState === "ready") ? 1 : 0);
     const inc = parseFloat(el("inc").value) * Math.PI / 180;
     el("incval").textContent = el("inc").value;
     gl.uniform3fv(U("uZd"), [0, Math.sin(inc), Math.cos(inc)]);
@@ -1181,7 +1296,10 @@ async function main(){
         `tau to horizon = ${tauHor.toFixed(2)} rS/c (${fmtSec(tauHor * rsSec)})   `;
     const diskNote = (el("disk").checked && R <= 1.52)
       ? "円盤表示は光子球の外まで (R > 1.52)   " : "";
-    document.getElementById("hud").textContent = hudPre + diskNote +
+    // no static observer inside the horizon: the shader shows the FFO view
+    const frameNote = (!camera.active && !el("ffo").checked && R <= 1.0)
+      ? "地平面の内側では静止できないので自由落下の視界   " : "";
+    document.getElementById("hud").textContent = hudPre + diskNote + frameNote +
       (camera.message ? camera.message + "   " : "") +
       `fps = ${fps.toFixed(0)}   ` +
       `f32 lookup err ~ ${meta.f32_bilinear_vs_exact_rad.toExponential(1)} rad`;
