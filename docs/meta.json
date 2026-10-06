@@ -7,9 +7,9 @@
  "b_cr": 2.598076211353316,
  "f32_grid_err_rad": 4.7671207248356495e-07,
  "f32_bilinear_vs_exact_rad": 3.38316161068164e-05,
- "int_nR": 107,
+ "int_nR": 137,
  "int_nchi": 721,
- "int_r_lo": 0.050000000000000044,
+ "int_r_lo": 0.001,
  "int_r_hi": 1.15,
  "disk_ny": 640,
  "disk_nsig": 1024,
@@ -22,8 +22,9 @@
  "disk_w0": -0.916290731874155,
  "disk_w1": 3.6635616461296463,
  "disk_b_max": 21.0,
- "disk_f32_r_rel_err": 9.641913612383196e-05,
+ "disk_f32_r_rel_err": 9.641913612421707e-05,
  "disk_R_cam_max": 39.0,
  "far_b_split": 20.0,
- "far_f32_vs_exact_rad": 4.967290357971166e-05
+ "far_f32_vs_exact_rad": 4.8719229264193586e-05,
+ "payload_id": "ee2bda56a339"
 }

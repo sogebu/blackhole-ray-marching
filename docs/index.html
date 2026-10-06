@@ -24,12 +24,12 @@
 <canvas id="gl" tabindex="0"></canvas>
 <div id="panel">
   <b>Schwarzschild viewer</b> <span class="note">(f32 lookup、horizon 貫通対応)</span>
-  <label>R = <span id="Rval"></span> r<sub>S</sub> <span class="note">(スライダは 30 まで、飛行に上限なし)</span><br>
-    <input id="R" type="range" min="0" max="1" step="any" value="0.55"></label>
+  <label>R = <span id="Rval"></span> r<sub>S</sub> <span class="note">(スライダは 0.001〜100、飛行に上限なし)</span><br>
+    <input id="R" type="range" min="0" max="1" step="any"></label>
   <label><input id="ffo" type="checkbox" checked> 自由落下カメラ (FFO)</label>
   <label><input id="free" type="checkbox"> 自由飛行 <span class="note">(外部 R &gt; 1.52 r<sub>S</sub>)</span></label>
   <label><button id="orbit">C: 円軌道</button> <button id="hover">0: 静止</button></label>
-  <label><input id="dop" type="checkbox"> ドップラー効果 <span class="note">(色 + 明るさ g&#8308;)</span></label>
+  <label hidden><input id="dop" type="checkbox"> ドップラー効果 <span class="note">(色 + 明るさ g&#8308;)</span></label>
   <label><input id="eternal" type="checkbox"> 永久 BH <span class="note">(あの世 mode、現実の BH は崩壊型 = OFF)</span></label>
   <label><input id="disk" type="checkbox"> 降着円盤 <span class="note">(Kepler 円盤 ISCO&ndash;12 r<sub>S</sub>、光子球の外まで)</span></label>
   <label>円盤の傾き <span id="incval"></span>&deg;
@@ -484,7 +484,10 @@ void main(){
           float gd = gE / (sqrt(A) * gam * (1.0 - bd));
           // blackbody at T_obs = g T(r); brightness (T_obs/T_max)^4 carries
           // the whole g^4 beaming (no separate factor: that would double it)
-          float Tobs = clamp((uDop ? gd : 1.0) * diskT(r), 300.0, 4.0e4);
+          // The disk always carries its Doppler shift (its left/right
+          // asymmetry is the point); uDop only switches the sky's shift,
+          // whose toggle is hidden for now (user 2026-10-06).
+          float Tobs = clamp(gd * diskT(r), 300.0, 4.0e4);
           float inten = uExpo * pow(Tobs / uTmax, 4.0);
           diskCol = vec3(bbR(Tobs), bbG(Tobs), bbB(Tobs)) / 255.0
                     * (inten / (1.0 + inten));
@@ -541,17 +544,25 @@ function compile(type, src){
 }
 
 async function main(){
-  const meta = await (await fetch("meta.json")).json();
+  // meta.json is always revalidated; the tables are keyed by its payload_id
+  // (content hash, export_table.py), so a cached old table can never be read
+  // with new grid sizes (Pages lets browsers cache files for 10 minutes).
+  const meta = await (await fetch("meta.json", { cache: "no-cache" })).json();
+  const q = meta.payload_id ? "?v=" + meta.payload_id : "";
+  const bin = name => fetch(name + ".bin" + q).then(r => r.arrayBuffer());
   const [buf, ibuf, rbuf, dus, das, duc, dac, daux] = await Promise.all([
-    fetch("psi_table.bin").then(r => r.arrayBuffer()),
-    fetch("interior_table.bin").then(r => r.arrayBuffer()),
-    fetch("interior_rgrid.bin").then(r => r.arrayBuffer()),
-    fetch("disk_u_scat.bin").then(r => r.arrayBuffer()),
-    fetch("disk_a_scat.bin").then(r => r.arrayBuffer()),
-    fetch("disk_u_cap.bin").then(r => r.arrayBuffer()),
-    fetch("disk_a_cap.bin").then(r => r.arrayBuffer()),
-    fetch("disk_aux.bin").then(r => r.arrayBuffer()),
+    bin("psi_table"), bin("interior_table"), bin("interior_rgrid"),
+    bin("disk_u_scat"), bin("disk_a_scat"), bin("disk_u_cap"),
+    bin("disk_a_cap"), bin("disk_aux"),
   ]);
+  const need = (b, floats, name) => {
+    if (b.byteLength !== 4 * floats)
+      throw new Error(`${name}.bin の大きさが meta.json と合いません ` +
+                      `(${b.byteLength} B、期待 ${4 * floats} B)。再読み込みしてください`);
+  };
+  need(buf, meta.nR * meta.nt, "psi_table");
+  need(ibuf, meta.int_nR * meta.int_nchi * 4, "interior_table");
+  need(rbuf, meta.int_nR, "interior_rgrid");
   const data = new Float32Array(buf);
 
   const prog = gl.createProgram();
@@ -704,7 +715,11 @@ async function main(){
     if (a < 172800) return (s / 3600).toPrecision(3) + " \u6642\u9593";
     return (s / 86400).toPrecision(3) + " \u65e5";
   };
-  const Rmin = 0.06, Rmax = meta.R_max;
+  // R slider: log scale from deep inside the horizon (0.001, the interior
+  // table's last row) out to 100 r_S.  It
+  // only picks a start radius; beyond the psi table (R_max = 30) the shader's
+  // far branch takes over, so any radius on it is exact.
+  const Rmin = 0.001, Rmax = 100, R_DEFAULT = 50;   // user choice 2026-10-06
   const sliderToR = s => Rmin * Math.pow(Rmax / Rmin, s);
   const RToSlider = R => Math.log(R / Rmin) / Math.log(Rmax / Rmin);
   const el = id => document.getElementById(id);
@@ -720,12 +735,16 @@ async function main(){
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
   // Free flight has an inner limit only.  R_max (30) is where the psi table
   // ends; beyond it the shader's far branch (psi_far.py) continues the exact
-  // map, so the exterior has no upper bound.  The R slider stays finite: it
-  // is the UI for picking a start radius, never a clamp on the camera.
+  // map, so the exterior has no upper bound.  The R slider stays finite (up
+  // to 100): it is the UI for picking a start radius, never a clamp.
   const FLIGHT_MIN = 1.52;
   const FLIGHT_STEP = 0.02, FLIGHT_FRAME_BUDGET = 0.04;
-  const PILOT_THRUST = 0.25, FLIGHT_DAMPING = 1.6;
+  // Pilot thrust and speed damping (proper acceleration in c^2/r_S, damping
+  // per r_S/c of proper time): the top speed is u = THRUST/DAMPING (= 0.625,
+  // beta 0.53), reached on a 1/DAMPING = 0.6 r_S/c time scale.
+  const PILOT_THRUST = 1.0, FLIGHT_DAMPING = 1.6;
   const setSliderFromR = R => { el("R").value = clamp(RToSlider(R), 0, 1); };
+  setSliderFromR(R_DEFAULT);
 
   // The camera event has a true world position during free flight.  At rest
   // the retained rHat lets a player stop anywhere on an orbit without the
@@ -733,7 +752,7 @@ async function main(){
   // camera.R is the authoritative radius; the slider only writes it when the
   // user moves the slider (input event), so R > R_max survives a pause.
   const camera = {
-    R: sliderToR(parseFloat(el("R").value)), rHat: [0, 0, 1], hHat: [0, 1, 0],
+    R: R_DEFAULT, rHat: [0, 0, 1], hHat: [0, 1, 0],
     E: 0, L: 0, rd: 0, active: false, lastNow: performance.now(),
     timeDebt: 0, orbitLock: false, message: "",
   };
@@ -896,7 +915,7 @@ async function main(){
       return false;
     }
     // Do not teleport the pilot.  The compensated static solution is stable
-    // throughout the table's exterior domain, including the default R = 1.83.
+    // throughout the exterior, from the inner flight limit to the default R = 50.
     falling = false; el("fall").textContent = "▶ 自由落下";
     camera.R = requestedR;
     seedFlight(camera.R, [0, 0, 0]);
@@ -961,7 +980,7 @@ async function main(){
     const tau = (performance.now() - fallT0) / 1000 * spd;
     const R32 = fallR32 - 1.5 * tau;
     const R = Math.pow(Math.max(R32, 0), 2 / 3);
-    if (R <= Rmin + 1e-4) {
+    if (R <= Rmin) {
       falling = false;
       el("fall").textContent = "▶ 自由落下";
       el("R").value = 0;
@@ -1034,13 +1053,8 @@ async function main(){
   window.addEventListener("blur", clearControls);
   document.addEventListener("visibilitychange", () => { if (document.hidden) clearControls(); });
 
-  // enabling the disk auto-enables Doppler (the physically honest default;
-  // unchecking dop afterwards is the deliberate "naive colors" comparison)
   el("sky").addEventListener("change", () => { updateSky(); canvas.focus(); });
   updateSky();                         // default = photo sky: start loading now
-  el("disk").addEventListener("change", () => {
-    if (el("disk").checked) el("dop").checked = true;
-  });
 
   let dragging = false, px = 0, py = 0;
   canvas.addEventListener("pointerdown", e => {
@@ -1250,7 +1264,8 @@ async function main(){
     }
     const R = camera.R;
     el("spdval").textContent = (0.2 * Math.pow(100, parseFloat(el("spd").value))).toFixed(1) + " rS/c 毎秒";
-    el("Rval").textContent = R < 1e4 ? R.toFixed(2) : R.toExponential(3);
+    el("Rval").textContent = R < 0.1 ? R.toPrecision(2)
+      : R < 1e4 ? R.toFixed(2) : R.toExponential(3);
     el("fovval").textContent = fov.toFixed(0);
 
     const aHat = scale(-1, camera.rHat);
@@ -1289,8 +1304,8 @@ async function main(){
       ? `自由飛行   R = ${el("Rval").textContent} rS   |beta| = ${betaMag.toFixed(3)}   ` +
         `E = ${camera.E.toFixed(4)}   L = ${camera.L.toFixed(4)}   `
       : R < 1.0
-      ? `r = ${R.toFixed(3)} rS   ⚫ inside the horizon   ` +
-        `tau to singularity = ${tauIn.toFixed(2)} rS/c (${fmtSec(tauIn * rsSec)})   `
+      ? `r = ${R < 0.1 ? R.toPrecision(2) : R.toFixed(3)} rS   ⚫ inside the horizon   ` +
+        `tau to singularity = ${tauIn < 0.1 ? tauIn.toPrecision(2) : tauIn.toFixed(2)} rS/c (${fmtSec(tauIn * rsSec)})   `
       : `R = ${el("Rval").textContent} rS   beta = ` +
         `${betaMag.toFixed(3)}   ` +
         `tau to horizon = ${tauHor.toFixed(2)} rS/c (${fmtSec(tauHor * rsSec)})   `;
