@@ -359,16 +359,14 @@ vec3 skyColor(float th, float ph){
   float lt = min(mod(td, 15.0), 15.0 - mod(td, 15.0));
   float lp = min(mod(pd, 15.0), 15.0 - mod(pd, 15.0));
   if (lt < 0.25 || lp < 0.25) c = vec3(0.55, 0.60, 0.70);
-  if (td < 2.0) c = vec3(1.00, 0.95, 0.70);
   return c;
 }
 
-// far universe: warm counterpart (R/B swap + orange marker), mirrors
-// render_interior.sky_color_III
+// far universe: warm counterpart (R/B swap) of render_interior.sky_color_III.
+// The web sky has no north-pole marker, so the offline renderers' orange
+// marker retint has nothing to act on here.
 vec3 skyColorIII(float th, float ph){
-  vec3 c = skyColor(th, ph);
-  bool marker = c.r > 0.9 && c.g > 0.9;
-  return marker ? vec3(1.00, 0.55, 0.20) : c.bgr;
+  return skyColor(th, ph).bgr;
 }
 
 void main(){
@@ -1000,6 +998,9 @@ async function main(){
   // machine-verification hook (used by the repo's browser-driven checks):
   // __bh.snap(opts) atomically applies a state, draws synchronously, scans
   // the center row, and restores — safe against concurrent live interaction.
+  // The "ring check" built on it (camera states, f64 targets from
+  // render_ffo.py's validated facts, tolerances) lives with the f64 renderer's
+  // verification notes, not in this payload.
   window.__bh = {
     drawOnce(){ draw(true); },
     snap(o){
@@ -1076,26 +1077,46 @@ async function main(){
                       disk: el("disk").checked, inc: el("inc").value,
                       mass: el("mass").value,
                       viewFwd: [...view.fwd], viewUp: [...view.up] }; },
+    // scan(): the right half of the centre row, read through the psi channel
+    // (same encoding as probe), not through colour.  Returns the shadow edge
+    // and the psi = pi / 3 pi Einstein rings as horizontal view angles.  psi
+    // is measured from the direction straight away from the hole, so the
+    // rings exist whatever the sky texture is (no marker needed).  Ring
+    // crossings are interpolated in psi between pixel centres; the shadow
+    // edge is the pixel boundary, so it carries +-0.5 px (px_deg).
     scan(){
+      gl.disable(gl.DITHER);
+      gl.uniform1i(U("uProbe"), 1);
+      draw(true);
       const w = canvas.width, h = canvas.height;
-      const cx = Math.floor(w / 2), cy = Math.floor(h / 2);
       const row = new Uint8Array(w * 4);
-      gl.readPixels(0, cy, w, 1, gl.RGBA, gl.UNSIGNED_BYTE, row);
-      const fovNow = parseFloat(el("fov").value);
-      const tanHalf = Math.tan(fovNow * Math.PI / 360);
-      const px2deg = x => Math.atan((x - cx) / (w / 2) * tanHalf * (w / h))
-                          * 180 / Math.PI;
-      let edge = -1, mark0 = -1, mark1 = -1;
-      for (let x = cx; x < w; x++) {
-        const i = x * 4, r = row[i], g = row[i+1], b = row[i+2];
-        if (edge < 0 && r + g + b > 10) edge = x;
-        const isMark = r > 230 && g > 220 && b > 150 && b < 200;
-        if (isMark && mark0 < 0) mark0 = x;
-        if (isMark) mark1 = x;
-      }
-      return { shadow_deg: edge < 0 ? null : px2deg(edge),
-               marker_deg: mark0 < 0 ? null
-                           : [px2deg(mark0), px2deg(mark1)] };
+      gl.readPixels(0, Math.floor(h / 2), w, 1, gl.RGBA, gl.UNSIGNED_BYTE, row);
+      gl.uniform1i(U("uProbe"), 0);
+      gl.enable(gl.DITHER);
+      draw(true);
+      const k = Math.tan(parseFloat(el("fov").value) * Math.PI / 360)
+                * (w / h) / (w / 2);
+      const deg = x => Math.atan((x - w / 2) * k) * 180 / Math.PI;  // x = screen coordinate
+      const psiAt = i => {
+        const v = (row[4*i] * 65536 + row[4*i+1] * 256 + row[4*i+2]) / 16777216;
+        return v === 0 ? null : 16 * v - 1;
+      };
+      let edge = -1;
+      for (let i = Math.floor(w / 2); i < w; i++)
+        if (psiAt(i) !== null) { edge = i; break; }
+      const ring = target => {
+        if (edge < 0) return null;
+        for (let i = edge + 1; i < w; i++) {
+          const a = psiAt(i - 1), b = psiAt(i);
+          if (a !== null && b !== null && a > target && b <= target)
+            return deg(i - 0.5 + (a - target) / (a - b));
+        }
+        return null;
+      };
+      return { shadow_deg: edge < 0 ? null : deg(edge),
+               ring_pi_deg: ring(Math.PI),
+               ring_3pi_deg: ring(3 * Math.PI),
+               px_deg: edge < 0 ? null : deg(edge + 1) - deg(edge) };
     },
   };
 
