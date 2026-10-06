@@ -18,17 +18,8 @@
   見回す。キーを離すと重力補償 hover に戻り、`C` は安定円軌道、`0` は静止。
   外部域 `R > 1.52 r_S` を上限なしに飛べる (遠くまで行くときは固有時間の倍率を上げる)。
   lookup table は `R = 30 r_S` までで、その外は光の曲がりを弱重力域の求積で継ぐ。
-- **空**: 実写の天の川 (既定) と 15° 格子を切り替え。天の川は初期視点で銀河中心が
-  ブラックホールの真後ろに来る向き。
-
-### 画像のクレジット
-
-天の川の全天画像 `docs/sky_milkyway.jpg` は、Kevin M. Loch が
-[bsrender](https://github.com/kevinloch/bsrender) で ESA Gaia EDR3 から描いた
-[Milkyway360-latlon-32kscaled8k-4200k-m14-s4-g1.png](https://commons.wikimedia.org/wiki/File:Milkyway360-latlon-32kscaled8k-4200k-m14-s4-g1.png)
-(Wikimedia Commons) を縮小したもので、
-[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) で配布する (このファイルのみ)。
-改変点は `docs/sky_milkyway.txt`。
+- **空**: 実写の天の川 (既定) と 15° 格子を切り替え。天の川の画像の作者・ライセンス
+  (CC BY-SA 4.0)・改変点は [`docs/sky_milkyway.txt`](docs/sky_milkyway.txt)。
 
 ## Rust ray marcher
 
