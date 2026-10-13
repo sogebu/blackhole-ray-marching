@@ -27,8 +27,8 @@
   <label>R = <span id="Rval"></span> r<sub>S</sub> <span class="note">(スライダは 0.001〜100、飛行に上限なし)</span><br>
     <input id="R" type="range" min="0" max="1" step="any"></label>
   <label><input id="ffo" type="checkbox" checked> 自由落下カメラ (FFO)</label>
-  <label><input id="free" type="checkbox"> 自由飛行 <span class="note">(地平面の外 R &gt; 1.02 r<sub>S</sub>、そこから先は放射落下に引き継ぎ)</span></label>
-  <label><button id="orbit">C: 円軌道</button> <button id="hover">0: 静止</button></label>
+  <label><input id="free" type="checkbox"> 自由飛行 <span class="note">(地平面の内側まで。内側は自由落下系が基準、推力は E・L を変える)</span></label>
+  <label><button id="orbit">C: 円軌道</button> <button id="hover">0: 静止 <span class="note">(内側は E = 0)</span></button></label>
   <label hidden><input id="dop" type="checkbox"> ドップラー効果 <span class="note">(色 + 明るさ g&#8308;)</span></label>
   <label><input id="eternal" type="checkbox"> 永久 BH <span class="note">(あの世 mode、現実の BH は崩壊型 = OFF)</span></label>
   <label><input id="disk" type="checkbox"> 降着円盤 <span class="note">(Kepler 円盤 ISCO&ndash;12 r<sub>S</sub>、光子球の外まで)</span></label>
@@ -52,9 +52,9 @@
     <input id="fov" type="range" min="30" max="150" step="1" value="100"></label>
   <label><button id="fall">▶ 自由落下</button>
     <span class="note">固有時間 ×<span id="spdval"></span></span>
-    <input id="spd" type="range" min="0" max="1" step="0.01" value="0.5"
+    <input id="spd" type="range" min="0" max="1" step="any" value="0.5"
            style="width:110px"></label>
-  <div class="note">drag・矢印: 自分の周りを見回し / wheel: fov / 自由飛行: W/S 前後、A/D 左右（離すと減速）</div>
+  <div class="note">drag・矢印: 自分の周りを見回し / wheel: fov / 自由飛行: W/S 前後、A/D 左右（離すと減速）／固有時間は選んだ質量の実時間 ×倍率（既定 1）で進む</div>
 </div>
 <div id="hud"></div>
 <script>
@@ -88,6 +88,8 @@ uniform vec3 uZd;                    // disk normal (world frame)
 uniform float uR, uTanHalf, uAspect;
 uniform vec3 uFwd, uRight, uUp, uBhat, uBeta;
 uniform bool uFFO, uFlying, uDop, uEternal, uDisk;   // uEternal: keep regions III/IV
+uniform bool uFlyIn;                 // powered pilot below R_SWITCH: uBeta is its
+                                     // velocity relative to the free-fall frame
 uniform bool uProbe;                 // machine check: output psi, not colour
 uniform sampler2D uSkyImg;           // photo sky (equirectangular, galactic)
 uniform bool uSkyImage;              // true: photo sky, false: 15-deg grid
@@ -429,12 +431,31 @@ void main(){
   // R = 1.02-1.09, facing the hole: exterior median 2e-6 rad, interior
   // 2e-4 with up to ~1 rad at the shadow edge (DESIGN.md "R = 1.1 の
   // engine 切替").
-  bool interior = uR <= 1.0 || (uFFO && uR < uEngineR);
+  bool interior = uR <= 1.0 || (uFFO && uR < uEngineR) || uFlyIn;
   if (interior) {
-    // interior/near-horizon engine (always the FFO frame)
+    // interior/near-horizon engine: the table is in the radial free-fall
+    // frame (E = 1, L = 0).  A powered pilot below R_SWITCH (uFlyIn) carries
+    // its velocity uBeta relative to that frame (interior_flight.py): its
+    // pixel is de-aberrated into the free-fall frame first, with the same
+    // map the exterior branch applies against the static frame, and the
+    // table's g is multiplied by the boost factor.
+    float gBoost = 1.0;
+    if (uFlyIn) {
+      float b2 = dot(uBeta, uBeta);
+      if (b2 > 1e-12) {
+        float gam = inversesqrt(max(1.0 - b2, 1e-7));
+        float bd = dot(uBeta, dir);
+        vec3 dirL = normalize((dir + (((gam - 1.0) * bd / b2 - gam) * uBeta))
+                              / (gam * (1.0 - bd)));
+        gBoost = 1.0 / (gam * (1.0 - bd));
+        cCam = clamp(dot(dirL, aHat), -1.0, 1.0);
+        p = dirL - aHat * cCam; pl = length(p);
+        p = (pl > 1e-6) ? p / pl : vec3(1.0, 0.0, 0.0);
+      }
+    }
     float chi = acos(cCam);
     vec3 v = intLookup(uR, chi);
-    psi = v.x; g = v.y; fate = int(v.z + 0.5);
+    psi = v.x; g = v.y * gBoost; fate = int(v.z + 0.5);
     // DEFAULT = collapse-formed hole: the far universe / white-hole light
     // do not exist — the star's image has redshifted away (BH_shooter
     // Sec. 4). The eternal view keeps regions III/IV.
@@ -708,6 +729,25 @@ async function main(){
   const view = { fwd: [0, 0, -1], right: [1, 0, 0], up: [0, 1, 0] };
   // mass presets: r_S/c in seconds (params.py is the reference)
   const RS_SEC = { sun: 9.851e-6, SgrA: 9.851e-6 * 4.30e6, M87: 9.851e-6 * 6.5e9 };
+  // Proper-time rate: wall-clock seconds advance the camera's proper time at
+  // the real rate of the selected mass (1 r_S/c = RS_SEC[mass] seconds) times
+  // the multiplier of the speed slider, 1e-4 .. 1e4 (log), default x1 = real
+  // time everywhere, inside and outside the horizon (user 2026-10-13「固有時間
+  // の倍率は常時１でよいのでは？」; Sgr A* then gives 28 s from the horizon in
+  // radial free fall and up to 66 s at E = 0).  Nothing but the slider
+  // changes the multiplier.
+  const MULT_DECADES = 4;
+  const multOf = () => Math.pow(10, MULT_DECADES * (2 * parseFloat(el("spd").value) - 1));
+  const rateOf = () => multOf() / RS_SEC[el("mass").value];      // r_S/c per wall second
+  function fmtRate(){
+    const m = multOf(), sec = RS_SEC[el("mass").value];
+    const mass = el("mass").options[el("mass").selectedIndex].text;
+    const f = x => Number(x.toPrecision(2)).toString();
+    const unit = sec >= 1 ? `1 rS/c = ${f(sec)} s` : `1 rS/c = ${f(sec * 1e6)} µs`;
+    return Math.abs(m - 1) < 0.02 ? `1（${mass} の実時間、${unit}）`
+      : m > 1 ? `${f(m)}（${mass} の実時間の ${f(m)} 倍速）`
+      : `${f(m)}（${mass} の実時間の 1/${f(1 / m)}）`;
+  }
   const fmtSec = s => {
     const a = Math.abs(s);
     if (a < 1e-3) return (s * 1e6).toPrecision(3) + " \u00b5s";
@@ -735,17 +775,21 @@ async function main(){
   const norm = a => Math.hypot(...a);
   const unit = a => scale(1 / Math.max(norm(a), 1e-14), a);
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
-  // Free flight has an inner limit only: the psi table's lower end
-  // (psi_table.R_MIN = meta.R_min = 1.02), the exterior engine's last row for
-  // a moving camera.  Reaching it hands the camera to the radial fall mode
-  // (coast), which continues into the interior engine.  Until 2026-10-13 the
-  // limit was the photon sphere (1.52, DESIGN.md "scope 境界 (v1)"); the
-  // exterior engine never needed it, only the disk tables do (R_DISK_MIN).
-  // R_max (30) is where the psi table ends; beyond it the shader's far branch
-  // (psi_far.py) continues the exact map, so the exterior has no upper bound.
-  // The R slider stays finite (up to 100): it is the UI for picking a start
-  // radius, never a clamp.
-  const FLIGHT_MIN = 1.02;
+  // Free flight has no inner limit (2026-10-13).  Below R_SWITCH (the psi
+  // table's last row, meta.R_min = 1.02) the pilot is described by its
+  // velocity relative to the radial free-fall observer (E = 1, L = 0), the
+  // frame of the interior table, instead of the local static observer, which
+  // does not exist at or inside the horizon; the view basis is rotated once
+  // at the switch so the physical camera frame is continuous (f64 reference
+  // and formulas: renderer/interior_flight.py).  The flight ends at the
+  // interior table's last row Rmin, where the fall ends too.  Until
+  // 2026-10-13 the limit was the photon sphere (1.52, DESIGN.md "scope 境界
+  // (v1)"); the exterior engine never needed it, only the disk tables do
+  // (R_DISK_MIN).  R_max (30) is where the psi table ends; beyond it the
+  // shader's far branch (psi_far.py) continues the exact map, so the
+  // exterior has no upper bound.  The R slider stays finite (up to 100): it
+  // is the UI for picking a start radius, never a clamp.
+  const R_SWITCH = 1.02;
   const FLIGHT_STEP = 0.02, FLIGHT_FRAME_BUDGET = 0.04;
   // Pilot thrust and speed damping (proper acceleration in c^2/r_S, damping
   // per r_S/c of proper time): the top speed is u = THRUST/DAMPING (= 0.625,
@@ -763,7 +807,7 @@ async function main(){
   const camera = {
     R: R_DEFAULT, rHat: [0, 0, 1], hHat: [0, 1, 0],
     E: 0, L: 0, rd: 0, active: false, lastNow: performance.now(),
-    timeDebt: 0, orbitLock: false, message: "",
+    timeDebt: 0, orbitLock: false, interior: false, message: "",
   };
   const keys = new Set();
 
@@ -798,8 +842,7 @@ async function main(){
     const trial = Math.abs(rHat[1]) < .9 ? [0, 1, 0] : [1, 0, 0];
     return unit(cross(rHat, trial));
   }
-  function seedFlight(R, beta){
-    R = Math.max(R, FLIGHT_MIN);
+  function seedFlight(R, beta){   // static-frame seeding: exterior only
     const b2 = dot3(beta, beta);
     if (b2 >= 1) beta = scale(.999999 / Math.sqrt(b2), beta);
     const gam = 1 / Math.sqrt(1 - dot3(beta, beta));
@@ -810,6 +853,91 @@ async function main(){
     camera.L = norm(lVec);
     camera.hHat = camera.L > 1e-12 ? unit(lVec) : fallbackNormal(camera.rHat);
     camera.rd = gam * Math.sqrt(A) * dot3(beta, camera.rHat);
+  }
+  // ---- below R_SWITCH: the radial free-fall observer is the reference
+  // (interior_flight.py is the f64 reference of every formula here)
+  function lemaitreBeta(){
+    // velocity relative to the E = 1, L = 0 faller, regular at the horizon
+    const R = camera.R, v = 1 / Math.sqrt(R), E = camera.E, L = camera.L, rd = camera.rd;
+    const q = 1 + L * L / (R * R), D = E * E + q / R, den = E - rd * v;
+    const betaR = (v * q + E * rd) / D, betaT = L * den / (R * D);
+    const tHat = unit(cross(camera.hHat, camera.rHat));
+    const beta = add(scale(betaR, camera.rHat), scale(betaT, tHat));
+    const b2 = dot3(beta, beta);
+    return b2 < 1 - 1e-9 ? beta : scale(Math.sqrt((1 - 1e-9) / b2), beta);
+  }
+  // A pilot with L != 0 whirls faster and faster as r -> 0 (dphi/dtau =
+  // L/r^2) while the reference faller does not, so their relative speed
+  // tends to c and the f32 aberration loses the picture; the flight ends
+  // when gamma relative to the free-fall frame passes LEM_GAMMA_MAX
+  // (a radial pilot never does: its beta -> 0 there).
+  const LEM_GAMMA_MAX = 30;
+  function seedFlightLem(R, beta){
+    // inverse map: E = gam (1 - beta_r v), rd = gam (beta_r - v), L = gam R beta_t
+    const b2 = dot3(beta, beta);
+    if (b2 >= 1) beta = scale(.999999 / Math.sqrt(b2), beta);
+    const gam = 1 / Math.sqrt(1 - dot3(beta, beta));
+    const v = 1 / Math.sqrt(R);
+    const betaR = dot3(beta, camera.rHat);
+    const lVec = scale(gam * R, cross(camera.rHat, beta));
+    camera.R = R;
+    camera.E = gam * (1 - betaR * v);
+    camera.rd = gam * (betaR - v);
+    camera.L = norm(lVec);
+    camera.hHat = camera.L > 1e-12 ? unit(lVec) : fallbackNormal(camera.rHat);
+  }
+  // Pilot tetrads in the static frame's Minkowski components (R > 1).
+  // Convention 1 (exterior) = pure boost of the static triad by the
+  // static-frame velocity; convention 2 (interior) = pure boost of the
+  // free-fall triad by the free-fall-frame velocity.  For one four-velocity
+  // the two spatial triads differ by a rotation (Wigner); the view basis is
+  // rotated by it when the pilot crosses R_SWITCH, so the physical camera
+  // frame is continuous (interior_flight.convention_rotation).
+  function boostFrame(beta){            // [e0, e1, e2, e3], 4-vectors [t, x, y, z]
+    const b2 = dot3(beta, beta), gam = 1 / Math.sqrt(1 - b2);
+    const frame = [[gam, ...scale(gam, beta)]];
+    for (let i = 0; i < 3; i++) {
+      const u = [0, 0, 0]; u[i] = 1;
+      const sp = b2 > 0 ? add(u, scale((gam - 1) * beta[i] / b2, beta)) : u;
+      frame.push([gam * beta[i], ...sp]);
+    }
+    return frame;
+  }
+  const eta = (a, b) => -a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+  function conventionRotation(){        // Rot[j][i]: d_interior = Rot d_exterior
+    const add4 = (a, b) => a.map((x, i) => x + b[i]);
+    const scale4 = (c, a) => a.map(x => c * x);
+    const [, ...E1] = boostFrame(flightBeta());
+    const bl = lemaitreBeta(), b2 = dot3(bl, bl), gam = 1 / Math.sqrt(1 - b2);
+    const [f0, ...f] = boostFrame(scale(-1 / Math.sqrt(camera.R), camera.rHat));
+    const bf = add4(add4(scale4(bl[0], f[0]), scale4(bl[1], f[1])), scale4(bl[2], f[2]));
+    const E2 = [];
+    for (let i = 0; i < 3; i++) {
+      let e = add4(scale4(gam * bl[i], f0), f[i]);
+      if (b2 > 0) e = add4(e, scale4((gam - 1) * bl[i] / b2, bf));
+      E2.push(e);
+    }
+    return E2.map(ej => E1.map(ei => eta(ej, ei)));
+  }
+  function switchConvention(toInterior){
+    const Rot = conventionRotation();
+    const f = toInterior
+      ? d => Rot.map(row => dot3(row, d))
+      : d => [0, 1, 2].map(i => Rot[0][i] * d[0] + Rot[1][i] * d[1] + Rot[2][i] * d[2]);
+    view.fwd = f(view.fwd); view.right = f(view.right); view.up = f(view.up);
+    camera.interior = toInterior;
+  }
+  // Proper time left to the singularity on the geodesic (E, L) from R < 1
+  // (interior_flight.remaining_proper_time: r = R sin^2 theta, midpoint rule)
+  function tauToSingularity(R, E, L, n = 200){
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+      const th = (i + .5) / n * Math.PI / 2, sn = Math.sin(th), cs = Math.cos(th);
+      const r = R * sn * sn;
+      const rd2 = E * E - (1 - 1 / r) * (1 + L * L / (r * r));
+      sum += 2 * R * sn * cs / Math.sqrt(Math.max(rd2, 1e-300));
+    }
+    return sum * Math.PI / 2 / n;
   }
   function flightBeta(){
     const A = 1 - 1 / camera.R;
@@ -842,20 +970,31 @@ async function main(){
     const Rnext = R + h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]);
     const rdNext = rd + h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
     const dPhi = h / 6 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
-    if (Rnext <= FLIGHT_MIN) {
-      // Hand the camera to the radial fall mode at the table's last row.
-      // The fall (E = 1, L = 0) replaces the pilot's own E, L: a visible
-      // aberration step when they differ.  The interior view of a general
-      // (E, L) observer is the roadmap item in DESIGN.md "次にやれること".
-      camera.R = FLIGHT_MIN;
-      camera.active = false; camera.timeDebt = 0; keys.clear();
-      el("free").checked = false;
-      startFall();
-      camera.message = "R = 1.02 rS で放射落下に引き継ぎ（内側は放射 FFO の視界）";
+    if (Rnext <= Rmin) {
+      // the interior table's last row: the flight ends where the fall does
+      camera.R = Rmin; camera.rd = rdNext;
+      camera.active = false; camera.interior = false; camera.timeDebt = 0;
+      keys.clear(); el("free").checked = false; el("ffo").checked = true;
+      setSliderFromR(Rmin);
+      camera.message = "r = 0.001 rS（interior table の下端）で飛行終了";
       return false;
     }
+    // Crossing R_SWITCH changes the reference frame (static <-> free fall).
+    // The view basis is rotated where the static frame still exists
+    // (R >= 1.02): before the step going in, after the step coming out.
+    if (!camera.interior && Rnext < R_SWITCH) switchConvention(true);
     camera.R = Rnext; camera.rd = rdNext;
     camera.rHat = unit(rotateAround(camera.rHat, camera.hHat, dPhi));
+    if (camera.interior && Rnext >= R_SWITCH) switchConvention(false);
+    if (camera.interior) {
+      const bl = lemaitreBeta(), gam = 1 / Math.sqrt(1 - dot3(bl, bl));
+      if (gam > LEM_GAMMA_MAX) {
+        camera.active = false; camera.interior = false; camera.timeDebt = 0;
+        keys.clear(); el("free").checked = false; el("ffo").checked = true;
+        camera.message = `r = ${camera.R.toPrecision(2)} rS: 自由落下系に対する速度が光速に近づき (γ > ${LEM_GAMMA_MAX})、表示の限界で飛行終了`;
+        return false;
+      }
+    }
     return true;
   }
   function thrustDirection(fwd, right){
@@ -880,6 +1019,11 @@ async function main(){
   function flightAcceleration(fwd, right){
     const direction = thrustDirection(fwd, right);
     if (direction) camera.orbitLock = false;
+    if (camera.interior) {
+      // No static observer to hold against and no hover to settle to inside:
+      // pure thrust on a geodesic (W/S/A/D change E and L, interior_flight.py).
+      return direction ? scale(PILOT_THRUST, direction) : [0, 0, 0];
+    }
     const beta = flightBeta();
     const u = scale(1 / Math.sqrt(1 - dot3(beta, beta)), beta);
     // Powered flight is a speed-controlled assist, rather than an undamped
@@ -892,6 +1036,14 @@ async function main(){
   function accelerate(h, acceleration){
     // Add the hold and pilot accelerations to proper velocity rather than
     // clipping beta: the camera remains subluminal at every update.
+    if (camera.interior) {
+      if (dot3(acceleration, acceleration) === 0) return;   // exact coast: E, L kept
+      const beta = lemaitreBeta();
+      const u = scale(1 / Math.sqrt(1 - dot3(beta, beta)), beta);
+      const uNext = add(u, scale(h, acceleration));
+      seedFlightLem(camera.R, scale(1 / Math.sqrt(1 + dot3(uNext, uNext)), uNext));
+      return;
+    }
     const beta = flightBeta();
     const u = scale(1 / Math.sqrt(1 - dot3(beta, beta)), beta);
     const uNext = add(u, scale(h, acceleration));
@@ -901,7 +1053,7 @@ async function main(){
   function flightStep(fwd, right){
     if (!camera.active) return;
     const now = performance.now();
-    const speed = 0.2 * Math.pow(100, parseFloat(el("spd").value));
+    const speed = rateOf();
     const dtWall = Math.max(0, (now - camera.lastNow) / 1000);
     camera.timeDebt += dtWall * speed;
     camera.lastNow = now;
@@ -915,7 +1067,8 @@ async function main(){
       Math.max(FLIGHT_FRAME_BUDGET, 1.5 * speed * Math.min(dtWall, 0.05)));
     camera.timeDebt -= remain;
     while (remain > 0 && camera.active) {
-      const h = Math.min(FLIGHT_STEP, remain);
+      const h = Math.min(FLIGHT_STEP, remain,     // never 5% of R per step
+        0.05 * camera.R / Math.max(Math.abs(camera.rd), 1e-9));   // (rd ~ R^-1/2 near 0)
       // Symmetric half-kicks make the no-input static solution stable: the
       // support acceleration cancels the geodesic fall without a one-step bias.
       accelerate(.5 * h, flightAcceleration(fwd, right));
@@ -927,19 +1080,25 @@ async function main(){
   }
   function startFreeFlight(){
     const requestedR = camera.R;
-    if (requestedR < FLIGHT_MIN) {
+    if (requestedR <= Rmin) {
       camera.active = false; el("free").checked = false;
-      camera.message = "自由飛行は R > 1.02 rS で使えます";
+      camera.message = "r = 0.001 rS（table の下端）からは飛べません";
       return false;
     }
-    // Do not teleport the pilot.  The compensated static solution is stable
-    // throughout the exterior, from the inner flight limit to the default R = 50.
+    // Do not teleport the pilot.  Outside R_SWITCH the compensated static
+    // solution is stable from the switch radius to the default R = 50; below
+    // it the pilot starts at rest in the free-fall frame (inside the horizon
+    // that is the view the static slider already shows).
     falling = false; el("fall").textContent = "▶ 自由落下";
     camera.R = requestedR;
-    seedFlight(camera.R, [0, 0, 0]);
+    camera.interior = requestedR < R_SWITCH;
+    if (camera.interior) seedFlightLem(camera.R, [0, 0, 0]);
+    else seedFlight(camera.R, [0, 0, 0]);
     camera.active = true; camera.lastNow = performance.now();
     camera.timeDebt = 0; camera.orbitLock = false;
-    camera.message = "現在位置で自由飛行を開始（重力補償中）";
+    camera.message = camera.interior
+      ? "地平面の近く／内側: 自由落下系に静止して開始（推力は E・L を変える）"
+      : "現在位置で自由飛行を開始（重力補償中）";
     el("ffo").checked = false; el("free").checked = true;
     return true;
   }
@@ -961,12 +1120,25 @@ async function main(){
   }
   function hover(){
     const requestedR = camera.R;
-    if (requestedR < FLIGHT_MIN) {
-      camera.active = false; el("free").checked = false;
-      camera.message = "静止は R > 1.02 rS で使えます";
+    if (requestedR < R_SWITCH) {
+      if (requestedR < 1.0) {
+        // "at rest" below the horizon: E = 0 and L = 0 (t and phi do not
+        // change along the worldline), the state of longest remaining proper
+        // time (interior_flight.py); beta = sqrt(R) outward relative to the
+        // free-fall frame gives exactly E = 0
+        falling = false; el("fall").textContent = "▶ 自由落下"; keys.clear();
+        camera.interior = true; camera.active = true; camera.lastNow = performance.now();
+        camera.timeDebt = 0; camera.orbitLock = false;
+        seedFlightLem(requestedR, scale(Math.sqrt(requestedR), camera.rHat));
+        el("ffo").checked = false; el("free").checked = true;
+        camera.message = "t と φ で静止（E = 0, L = 0）= 内側で最も長く生きる落下";
+        return true;
+      }
+      camera.message = "地平面の直上 (1 ≤ R < 1.02) では静止できません";
       return false;
     }
     falling = false; keys.clear(); camera.R = requestedR;
+    camera.interior = false;
     seedFlight(camera.R, [0, 0, 0]);
     camera.active = true; camera.lastNow = performance.now();
     camera.timeDebt = 0; camera.orbitLock = false;
@@ -978,12 +1150,12 @@ async function main(){
 
   // ---- real-time free fall: r(tau) = (R0^{3/2} - (3/2) tau)^{2/3}
   // (memo FFO section; same closed form as render_fall_movie.py)
-  let falling = false, fallR32 = 0, fallT0 = 0;
+  let falling = false, fallR32 = 0, fallTau = 0, fallLast = 0;
   function startFall(){
     const R = camera.R;                        // fall from where the camera is
-    camera.active = false; el("free").checked = false;
+    camera.active = false; camera.interior = false; el("free").checked = false;
     fallR32 = Math.pow(R, 1.5);
-    fallT0 = performance.now();
+    fallTau = 0; fallLast = performance.now();
     falling = true;
     el("ffo").checked = true;                 // 落下中は FFO frame
     el("fall").textContent = "■ 停止";
@@ -994,12 +1166,16 @@ async function main(){
     startFall();
   });
   function fallStep(){
-    // tau rate: speed slider maps to 0.2 .. 20 r_S/c per wall second (log)
-    const spd = 0.2 * Math.pow(100, parseFloat(el("spd").value));
-    el("spdval").textContent = spd.toFixed(1) + " rS/c 毎秒";
+    const spd = rateOf();
+    el("spdval").textContent = fmtRate();
     if (!falling) return;
-    const tau = (performance.now() - fallT0) / 1000 * spd;
-    const R32 = fallR32 - 1.5 * tau;
+    // proper time accumulates frame by frame at the current rate (a slider
+    // change mid-fall is not a teleport; a tab pause adds at most 0.1 s of
+    // wall time)
+    const now = performance.now();
+    fallTau += Math.min((now - fallLast) / 1000, 0.1) * spd;
+    fallLast = now;
+    const R32 = fallR32 - 1.5 * fallTau;
     const R = Math.pow(Math.max(R32, 0), 2 / 3);
     if (R <= Rmin) {
       falling = false;
@@ -1022,11 +1198,14 @@ async function main(){
     const R = sliderToR(parseFloat(el("R").value));
     if (camera.active) {
       keys.clear();
-      if (R < FLIGHT_MIN) {
-        camera.active = false; el("free").checked = false;
+      if (R < R_SWITCH) {
+        // no hover to re-seed there: the slider leaves the flight and shows
+        // the static camera (the free-fall view inside the horizon)
+        camera.active = false; camera.interior = false; el("free").checked = false;
         camera.R = R;
-        camera.message = "R < 1.02 rS なので自由飛行を終了";
+        camera.message = "R < 1.02 rS: スライダでは静止カメラ（自由飛行を終了）";
       } else {
+        camera.interior = false;
         seedFlight(R, [0, 0, 0]);
         camera.orbitLock = false; camera.timeDebt = 0;
         camera.lastNow = performance.now();
@@ -1034,7 +1213,7 @@ async function main(){
       }
       return;
     }
-    if (falling) { fallR32 = Math.pow(R, 1.5); fallT0 = performance.now(); }
+    if (falling) { fallR32 = Math.pow(R, 1.5); fallTau = 0; fallLast = performance.now(); }
     camera.R = R;
     camera.message = "";
   });
@@ -1205,6 +1384,8 @@ async function main(){
       const b = viewBasis();
       const out = { w, h, R: camera.R, aHat: scale(-1, camera.rHat),
                     beta: [...lastBeta], fwd: b.fwd, right: b.right, up: b.up,
+                    flying: camera.active,
+                    frame: (camera.active && camera.interior) ? "lemaitre" : "static",
                     tanHalf: Math.tan(parseFloat(el("fov").value) * Math.PI / 360),
                     s };
       gl.uniform1i(U("uProbe"), 0);
@@ -1237,6 +1418,8 @@ async function main(){
       if (o.pitch !== undefined) pitch = o.pitch;
     },
     state(){ return { Rslider: el("R").value, R: camera.R, rHat: [...camera.rHat],
+                      hHat: [...camera.hHat], E: camera.E, L: camera.L, rd: camera.rd,
+                      active: camera.active, interior: camera.interior,
                       yaw, pitch,
                       fov: el("fov").value, ffo: el("ffo").checked,
                       dop: el("dop").checked, eternal: el("eternal").checked,
@@ -1303,13 +1486,13 @@ async function main(){
       else fallStep();
     }
     const R = camera.R;
-    el("spdval").textContent = (0.2 * Math.pow(100, parseFloat(el("spd").value))).toFixed(1) + " rS/c 毎秒";
+    el("spdval").textContent = fmtRate();
     el("Rval").textContent = R < 0.1 ? R.toPrecision(2)
       : R < 1e4 ? R.toFixed(2) : R.toExponential(3);
     el("fovval").textContent = fov.toFixed(0);
 
     const aHat = scale(-1, camera.rHat);
-    const betaVec = camera.active ? flightBeta()
+    const betaVec = camera.active ? (camera.interior ? lemaitreBeta() : flightBeta())
       : ((el("ffo").checked && R > 1.0) ? scale(Math.sqrt(1 / R), aHat) : [0, 0, 0]);
     lastBeta = betaVec;
 
@@ -1323,6 +1506,7 @@ async function main(){
     gl.uniform3fv(U("uBeta"), betaVec);
     gl.uniform1i(U("uFFO"), (!camera.active && el("ffo").checked) ? 1 : 0);
     gl.uniform1i(U("uFlying"), camera.active ? 1 : 0);
+    gl.uniform1i(U("uFlyIn"), (camera.active && camera.interior) ? 1 : 0);
     gl.uniform1i(U("uDop"), el("dop").checked ? 1 : 0);
     gl.uniform1i(U("uEternal"), el("eternal").checked ? 1 : 0);
     gl.uniform1i(U("uDisk"), el("disk").checked ? 1 : 0);
@@ -1340,9 +1524,15 @@ async function main(){
     const tauIn = 2 / 3 * Math.pow(R, 1.5);
     const tauHor = 2 / 3 * (Math.pow(R, 1.5) - 1);
     const betaMag = norm(betaVec);
+    const tauFly = (camera.active && R < 1.0) ? tauToSingularity(R, camera.E, camera.L) : 0;
     const hudPre = camera.active
-      ? `自由飛行   R = ${el("Rval").textContent} rS   |beta| = ${betaMag.toFixed(3)}   ` +
-        `E = ${camera.E.toFixed(4)}   L = ${camera.L.toFixed(4)}   `
+      ? (camera.interior
+          ? `自由飛行（自由落下系基準）   r = ${el("Rval").textContent} rS` +
+            `${R < 1.0 ? "   ⚫ inside the horizon" : ""}   |beta| = ${betaMag.toFixed(3)}   ` +
+            `E = ${camera.E.toFixed(4)}   L = ${camera.L.toFixed(4)}   ` +
+            (R < 1.0 ? `tau to singularity = ${tauFly < 0.1 ? tauFly.toPrecision(2) : tauFly.toFixed(2)} rS/c (${fmtSec(tauFly * rsSec)})   ` : "")
+          : `自由飛行   R = ${el("Rval").textContent} rS   |beta| = ${betaMag.toFixed(3)}   ` +
+            `E = ${camera.E.toFixed(4)}   L = ${camera.L.toFixed(4)}   `)
       : R < 1.0
       ? `r = ${R < 0.1 ? R.toPrecision(2) : R.toFixed(3)} rS   ⚫ inside the horizon   ` +
         `tau to singularity = ${tauIn < 0.1 ? tauIn.toPrecision(2) : tauIn.toFixed(2)} rS/c (${fmtSec(tauIn * rsSec)})   `
