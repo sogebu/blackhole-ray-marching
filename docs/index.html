@@ -27,7 +27,7 @@
   <label>R = <span id="Rval"></span> r<sub>S</sub> <span class="note">(スライダは 0.001〜100、飛行に上限なし)</span><br>
     <input id="R" type="range" min="0" max="1" step="any"></label>
   <label><input id="ffo" type="checkbox" checked> 自由落下カメラ (FFO)</label>
-  <label><input id="free" type="checkbox"> 自由飛行 <span class="note">(外部 R &gt; 1.52 r<sub>S</sub>)</span></label>
+  <label><input id="free" type="checkbox"> 自由飛行 <span class="note">(地平面の外 R &gt; 1.02 r<sub>S</sub>、そこから先は放射落下に引き継ぎ)</span></label>
   <label><button id="orbit">C: 円軌道</button> <button id="hover">0: 静止</button></label>
   <label hidden><input id="dop" type="checkbox"> ドップラー効果 <span class="note">(色 + 明るさ g&#8308;)</span></label>
   <label><input id="eternal" type="checkbox"> 永久 BH <span class="note">(あの世 mode、現実の BH は崩壊型 = OFF)</span></label>
@@ -47,7 +47,7 @@
     <a href="https://commons.wikimedia.org/wiki/File:Milkyway360-latlon-32kscaled8k-4200k-m14-s4-g1.png" target="_blank" rel="noopener">Kevin M. Loch</a>
     (bsrender、ESA Gaia EDR3)、
     <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener">CC BY-SA 4.0</a>、
-    縮小して使用。銀河中心が初期視点の BH の真後ろ。</div>
+    縮小して使用。初期視点では BH が銀河の回転の向き (l = 90&deg;) の銀河面 30&deg; 上、銀河中心は右手 90&deg;。</div>
   <label>fov <span id="fovval"></span>&deg;
     <input id="fov" type="range" min="30" max="150" step="1" value="100"></label>
   <label><button id="fall">▶ 自由落下</button>
@@ -238,8 +238,6 @@ vec3 intLookup(float R, float chi){
   return vec3(v.x, v.y, v.z);
 }
 
-vec3 skyColorIII(float th, float ph);   // forward decl
-
 // ---- chromatic Doppler: Nakayama-Oda PTEP 2017 Sec. 5.4 (per-channel
 // color-temperature shift; python reference = doppler_rgb.py, same formulas.
 // channel floor 1/255 here (f32 pow range), 1e-3 in the f64 reference).
@@ -387,13 +385,17 @@ vec3 skyGrid(vec3 s){
 // (l = 0 at the image centre, l growing to the left, b = +90 deg at the top;
 // source and license: export_sky.py / sky_milkyway.txt).  The galactic frame
 // is pinned to the world frame so that the initial view (camera on +z looking
-// at the hole along -z, screen up +y, screen right +x) has the Galactic
-// Centre straight behind the hole and galactic north up.  GAL_L90 =
-// GAL_N x GAL_C keeps the frame right-handed (l = 90 deg on screen left, as
-// seen from inside the sphere).
-const vec3 GAL_C = vec3(0.0, 0.0, -1.0);    // (l, b) = (0, 0)
-const vec3 GAL_L90 = vec3(-1.0, 0.0, 0.0);  // (90 deg, 0)
-const vec3 GAL_N = vec3(0.0, 1.0, 0.0);     // b = +90 deg
+// at the hole along -z, screen up +y, screen right +x) has the hole in the
+// direction of galactic rotation, 30 deg above the plane: -z = (l, b) =
+// (90 deg, +30 deg), galactic north as far up as that allows (+y = cos30 N
+// - sin30 L90), which puts the Galactic Centre exactly on screen right (+x)
+// and the Milky Way band 30 deg below the hole.  The frame is right-handed,
+// GAL_C x GAL_L90 = GAL_N (l grows to the left as seen from inside the
+// sphere).  User choice 2026-10-13 (DESIGN.md "初期視点の銀河の向き"); until
+// then the Centre sat straight behind the hole with north up.
+const vec3 GAL_C = vec3(1.0, 0.0, 0.0);                 // (l, b) = (0, 0)
+const vec3 GAL_L90 = vec3(0.0, -0.5, -0.8660254038);    // (90 deg, 0)
+const vec3 GAL_N = vec3(0.0, 0.8660254038, -0.5);       // b = +90 deg
 vec3 skyImage(vec3 s){
   float l = atan(dot(s, GAL_L90), dot(s, GAL_C));
   float b = asin(clamp(dot(s, GAL_N), -1.0, 1.0));
@@ -733,11 +735,17 @@ async function main(){
   const norm = a => Math.hypot(...a);
   const unit = a => scale(1 / Math.max(norm(a), 1e-14), a);
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
-  // Free flight has an inner limit only.  R_max (30) is where the psi table
-  // ends; beyond it the shader's far branch (psi_far.py) continues the exact
-  // map, so the exterior has no upper bound.  The R slider stays finite (up
-  // to 100): it is the UI for picking a start radius, never a clamp.
-  const FLIGHT_MIN = 1.52;
+  // Free flight has an inner limit only: the psi table's lower end
+  // (psi_table.R_MIN = meta.R_min = 1.02), the exterior engine's last row for
+  // a moving camera.  Reaching it hands the camera to the radial fall mode
+  // (coast), which continues into the interior engine.  Until 2026-10-13 the
+  // limit was the photon sphere (1.52, DESIGN.md "scope 境界 (v1)"); the
+  // exterior engine never needed it, only the disk tables do (R_DISK_MIN).
+  // R_max (30) is where the psi table ends; beyond it the shader's far branch
+  // (psi_far.py) continues the exact map, so the exterior has no upper bound.
+  // The R slider stays finite (up to 100): it is the UI for picking a start
+  // radius, never a clamp.
+  const FLIGHT_MIN = 1.02;
   const FLIGHT_STEP = 0.02, FLIGHT_FRAME_BUDGET = 0.04;
   // Pilot thrust and speed damping (proper acceleration in c^2/r_S, damping
   // per r_S/c of proper time): the top speed is u = THRUST/DAMPING (= 0.625,
@@ -749,8 +757,9 @@ async function main(){
   // The camera event has a true world position during free flight.  At rest
   // the retained rHat lets a player stop anywhere on an orbit without the
   // old radius slider snapping the world back to its initial z-axis ray.
-  // camera.R is the authoritative radius; the slider only writes it when the
-  // user moves the slider (input event), so R > R_max survives a pause.
+  // camera.R is the authoritative radius; the slider writes it only on the
+  // user's input event (and the integrators write the slider back), so
+  // R > R_max survives a pause.
   const camera = {
     R: R_DEFAULT, rHat: [0, 0, 1], hHat: [0, 1, 0],
     E: 0, L: 0, rd: 0, active: false, lastNow: performance.now(),
@@ -810,10 +819,14 @@ async function main(){
     return add(scale(betaR, camera.rHat), scale(camera.L / (gam * camera.R), tHat));
   }
   function geodesicRhs(R, rd){
-    const A = 1 - 1 / R, Ap = 1 / (R * R);
+    // d2r/dtau2 = -1/(2R^2) + L^2/R^3 - (3/2) L^2/R^4 (r_S units).  This is
+    // the old form Ap/(2A) (rd^2 - E^2) + A L^2/R^3 with the energy
+    // constraint rd^2 = E^2 - A (1 + L^2/R^2) substituted: no 1/A, so it is
+    // regular at the horizon and does not amplify constraint drift near it
+    // (freeflight.py _rhs is the f64 reference of the same form).
+    const L2 = camera.L * camera.L;
     return [rd,
-      Ap / (2 * A) * (rd * rd - camera.E * camera.E)
-        + A * camera.L * camera.L / (R * R * R),
+      -1 / (2 * R * R) + L2 / (R * R * R) - 1.5 * L2 / (R * R * R * R),
       camera.L / (R * R)];
   }
   function rotateAround(v, axis, angle){
@@ -830,10 +843,15 @@ async function main(){
     const rdNext = rd + h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
     const dPhi = h / 6 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
     if (Rnext <= FLIGHT_MIN) {
+      // Hand the camera to the radial fall mode at the table's last row.
+      // The fall (E = 1, L = 0) replaces the pilot's own E, L: a visible
+      // aberration step when they differ.  The interior view of a general
+      // (E, L) observer is the roadmap item in DESIGN.md "次にやれること".
       camera.R = FLIGHT_MIN;
-      camera.active = false; camera.timeDebt = 0;
-      el("free").checked = false; el("ffo").checked = false;
-      camera.message = "自由飛行は R = 1.52 rS で停止（内側は放射 FFO mode の領域）";
+      camera.active = false; camera.timeDebt = 0; keys.clear();
+      el("free").checked = false;
+      startFall();
+      camera.message = "R = 1.02 rS で放射落下に引き継ぎ（内側は放射 FFO の視界）";
       return false;
     }
     camera.R = Rnext; camera.rd = rdNext;
@@ -905,13 +923,13 @@ async function main(){
       accelerate(.5 * h, flightAcceleration(fwd, right));
       remain -= h;
     }
-    setSliderFromR(camera.R);                  // display only; pinned past R_max
+    setSliderFromR(camera.R);                  // echo the flight; pinned past R_max
   }
   function startFreeFlight(){
     const requestedR = camera.R;
     if (requestedR < FLIGHT_MIN) {
       camera.active = false; el("free").checked = false;
-      camera.message = "自由飛行は R > 1.52 rS で使えます";
+      camera.message = "自由飛行は R > 1.02 rS で使えます";
       return false;
     }
     // Do not teleport the pilot.  The compensated static solution is stable
@@ -945,7 +963,7 @@ async function main(){
     const requestedR = camera.R;
     if (requestedR < FLIGHT_MIN) {
       camera.active = false; el("free").checked = false;
-      camera.message = "静止は R > 1.52 rS で使えます";
+      camera.message = "静止は R > 1.02 rS で使えます";
       return false;
     }
     falling = false; keys.clear(); camera.R = requestedR;
@@ -961,16 +979,19 @@ async function main(){
   // ---- real-time free fall: r(tau) = (R0^{3/2} - (3/2) tau)^{2/3}
   // (memo FFO section; same closed form as render_fall_movie.py)
   let falling = false, fallR32 = 0, fallT0 = 0;
-  el("fall").addEventListener("click", () => {
-    if (falling) { falling = false; el("fall").textContent = "▶ 自由落下"; return; }
+  function startFall(){
     const R = camera.R;                        // fall from where the camera is
     camera.active = false; el("free").checked = false;
-    camera.message = "";
     fallR32 = Math.pow(R, 1.5);
     fallT0 = performance.now();
     falling = true;
     el("ffo").checked = true;                 // 落下中は FFO frame
     el("fall").textContent = "■ 停止";
+  }
+  el("fall").addEventListener("click", () => {
+    if (falling) { falling = false; el("fall").textContent = "▶ 自由落下"; return; }
+    camera.message = "";
+    startFall();
   });
   function fallStep(){
     // tau rate: speed slider maps to 0.2 .. 20 r_S/c per wall second (log)
@@ -991,11 +1012,30 @@ async function main(){
     camera.R = R;
   }
 
-  // The slider moves the camera only while it is idle; during flight or a
-  // fall the slider is a display the integrator overwrites.
+  // The slider always moves the camera (user 2026-10-13: while flying or
+  // falling it used to be a display the integrator overwrote every frame, so
+  // dragging it snapped back and looked broken).  In free flight the camera
+  // is re-seeded at rest at the new radius (below the flight limit the flight
+  // ends and the static camera takes over); during a fall the fall restarts
+  // from the new radius.
   el("R").addEventListener("input", () => {
-    if (camera.active || falling) return;
-    camera.R = sliderToR(parseFloat(el("R").value));
+    const R = sliderToR(parseFloat(el("R").value));
+    if (camera.active) {
+      keys.clear();
+      if (R < FLIGHT_MIN) {
+        camera.active = false; el("free").checked = false;
+        camera.R = R;
+        camera.message = "R < 1.02 rS なので自由飛行を終了";
+      } else {
+        seedFlight(R, [0, 0, 0]);
+        camera.orbitLock = false; camera.timeDebt = 0;
+        camera.lastNow = performance.now();
+        camera.message = "スライダの R へ移動（静止、重力補償中）";
+      }
+      return;
+    }
+    if (falling) { fallR32 = Math.pow(R, 1.5); fallT0 = performance.now(); }
+    camera.R = R;
     camera.message = "";
   });
   el("free").addEventListener("change", () => {
