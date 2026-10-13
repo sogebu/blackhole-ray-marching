@@ -722,7 +722,7 @@ async function main(){
       : skyState === "failed" ? "画像を読み込めませんでした" : "";
   }
 
-  // ---- camera state (R range now crosses the horizon down to 0.06)
+  // ---- camera state (the R range crosses the horizon down to Rmin below)
   let yaw = 0, pitch = 0, fov = 100;
   // This is a camera-attached triad, not a coordinate triad centred on the
   // black hole.  Every look input rotates these three axes in place.
