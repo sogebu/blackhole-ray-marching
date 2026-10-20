@@ -22,8 +22,97 @@
  "disk_w0": -0.916290731874155,
  "disk_w1": 3.6635616461296463,
  "disk_b_max": 21.0,
- "disk_f32_r_rel_err": 9.641913612421707e-05,
+ "disk_f32_r_rel_err": 9.17890586239441e-05,
+ "disk_f32_strata": {
+  "a R in [2, 39] + far (pre-2026-10-13 domain)": {
+   "n": 150,
+   "ray_shift_max_rad": 5.813779191399249e-08,
+   "shader_max": 8.516447625623181e-05,
+   "shader_median": 2.170746177554364e-05,
+   "pixel_max": 9.17890586239441e-05,
+   "pixel_median": 2.4384796578019925e-05,
+   "pixel_miss": 0,
+   "sigma_floor": 0
+  },
+  "b R~1.5 near b_cr": {
+   "n": 200,
+   "ray_shift_max_rad": 1.0196893907021831e-07,
+   "shader_max": 2.70109206970328e-05,
+   "shader_median": 6.0540677718372856e-06,
+   "pixel_max": 0.00038606061777399166,
+   "pixel_median": 6.667630269219189e-06,
+   "pixel_miss": 0,
+   "sigma_floor": 0
+  },
+  "c small b": {
+   "n": 200,
+   "ray_shift_max_rad": 1.3633894013764802e-08,
+   "shader_max": 4.796106346679341e-05,
+   "shader_median": 4.912287463108474e-06,
+   "pixel_max": 4.679311861131866e-05,
+   "pixel_median": 5.08196291209325e-06,
+   "pixel_miss": 0,
+   "sigma_floor": 0
+  },
+  "d static 1<R<=1.52": {
+   "n": 200,
+   "ray_shift_max_rad": 2.556635041450761e-07,
+   "shader_max": 5.426029914637282e-05,
+   "shader_median": 6.332525959116103e-06,
+   "pixel_max": 0.024667851588517437,
+   "pixel_median": 9.357465956474965e-06,
+   "pixel_miss": 0,
+   "sigma_floor": 0
+  },
+  "e free fall R<1.02 (sky I)": {
+   "n": 200,
+   "ray_shift_max_rad": 8.687527408568485e-08,
+   "shader_max": 0.0014851928169757652,
+   "shader_median": 9.612562506166407e-06,
+   "pixel_max": 0.5059809440957334,
+   "pixel_median": 4.889685860078889e-05,
+   "pixel_miss": 1,
+   "sigma_floor": 0
+  },
+  "f seams": {
+   "n": 200,
+   "ray_shift_max_rad": 2.619769343681355e-07,
+   "shader_max": 0.00016428332524236438,
+   "shader_median": 9.668229505610371e-06,
+   "pixel_max": 0.005452108148211533,
+   "pixel_median": 1.295339749450297e-05,
+   "pixel_miss": 0,
+   "sigma_floor": 0
+  },
+  "g camera at its periastron (chi_st~90 deg)": {
+   "n": 200,
+   "ray_shift_max_rad": 3.5258891717404595e-07,
+   "shader_max": 2.801528463699372e-05,
+   "shader_median": 3.4152831629486158e-06,
+   "pixel_max": 6.473715645395321e-05,
+   "pixel_median": 4.192558103231642e-06,
+   "pixel_miss": 0,
+   "sigma_floor": 0
+  },
+  "h critical band |b - b_cr| < 1e-4 (both sides)": {
+   "n": 200,
+   "runs": 1000,
+   "floored": 240,
+   "ray_shift_max_rad": 5.38306138753164e-06,
+   "shader_max": 3.7785389494626295e-05,
+   "shader_median": 1.0679558052168475e-05,
+   "shader_disagreements": 0,
+   "pixel_max": 0.003374384396651641,
+   "pixel_median": 1.1100577657639201e-05,
+   "pixel_disagreements": 0
+  }
+ },
  "disk_R_cam_max": 39.0,
+ "disk_b_quad": 2.0,
+ "disk_y_arc": -3.7013019741124937,
+ "disk_x_arc": -0.6419753086419753,
+ "disk_row_floor": 1e-08,
+ "disk_scat_q0": 7.598870072732198e-05,
  "far_b_split": 20.0,
  "far_f32_vs_exact_rad": 4.8719229264193586e-05,
  "payload_id": "ee2bda56a339"
