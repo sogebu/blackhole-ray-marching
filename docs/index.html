@@ -97,6 +97,8 @@ const I18N = {
     noFlyDeep: "r = 0.001 rS（table の下端）からは飛べません",
     flyInside: "地平面の近く／内側: 自由落下系に静止して開始（推力は E・L を変える）",
     flyHere: "現在位置で自由飛行を開始（重力補償中）",
+    flyFromFall: "現在位置で自由飛行を開始（自由落下の速度から。離すと静止に戻る）",
+    flyInsideStatic: "地平面の直上: 静止の速度から開始（ここでは静止を保てない。推力は E・L を変える）",
     orbitMin: "C の安定円軌道は R > 3 rS で使えます",
     orbitOn: "円軌道に入りました",
     restInside: "t と φ で静止（E = 0, L = 0）= 内側で最も長く生きる落下",
@@ -158,6 +160,8 @@ const I18N = {
     noFlyDeep: "Cannot fly from r = 0.001 rS (the end of the table)",
     flyInside: "Near or inside the horizon: starting at rest in the free-fall frame (thrust changes E and L)",
     flyHere: "Free flight from here (gravity-compensated hover)",
+    flyFromFall: "Free flight from here, starting at the free faller's velocity (release to settle to a hover)",
+    flyInsideStatic: "Just above the horizon: starting at the static observer's velocity (no hover here; thrust changes E and L)",
     orbitMin: "C (stable circular orbit) works for R > 3 rS",
     orbitOn: "On a circular orbit",
     restInside: "At rest in t and φ (E = 0, L = 0) = the longest-lived fall inside",
@@ -1462,20 +1466,34 @@ async function main(){
       camera.message = t("noFlyDeep");
       return false;
     }
-    // Do not teleport the pilot.  Outside R_SWITCH the compensated static
-    // solution is stable from the switch radius to the default R = 50; below
-    // it the pilot starts at rest in the free-fall frame (inside the horizon
-    // that is the view the static slider already shows).
+    // Do not teleport the pilot, in position or in velocity: the flight starts
+    // with the four-velocity of the camera on the screen, so the first thrust
+    // frame shows the same view (the same boost) and the thrust then changes
+    // it continuously.  The camera on the screen is the radial free faller
+    // (E = 1, L = 0) when the FFO box is on (also during a fall) or inside
+    // the horizon, else the static observer; draw() makes the same choice.
+    // Until 2026-10-20 the flight started at rest in the static frame, so W
+    // on the initial screen (R = 50, FFO on) dropped the faller's boost
+    // sqrt(1/R) = 0.14 in one frame and the picture jumped (DESIGN.md
+    // "W を押した瞬間の跳び").  Outside R_SWITCH a faller's start is
+    // seedFlight with beta = sqrt(1/R) toward the hole; the hold and damping
+    // then bring it to a hover.  Below R_SWITCH the faller is the free-fall
+    // frame itself (beta = 0), and a static camera (1 < R < R_SWITCH, FFO
+    // off) moves outward at sqrt(1/R) relative to it, which seedFlightLem
+    // maps to the static E = sqrt(A), rd = 0.
+    const showsFaller = el("ffo").checked || requestedR <= 1.0;
+    const vFall = Math.sqrt(1 / requestedR);
     falling = false; el("fall").textContent = t("fall");
     camera.R = requestedR;
     camera.interior = requestedR < R_SWITCH;
-    if (camera.interior) seedFlightLem(camera.R, [0, 0, 0]);
-    else seedFlight(camera.R, [0, 0, 0]);
+    if (camera.interior)
+      seedFlightLem(camera.R, showsFaller ? [0, 0, 0] : scale(vFall, camera.rHat));
+    else seedFlight(camera.R, showsFaller ? scale(-vFall, camera.rHat) : [0, 0, 0]);
     camera.active = true; camera.lastNow = performance.now();
     camera.timeDebt = 0; camera.orbitLock = false;
     camera.message = camera.interior
-      ? t("flyInside")
-      : t("flyHere");
+      ? t(showsFaller ? "flyInside" : "flyInsideStatic")
+      : t(showsFaller ? "flyFromFall" : "flyHere");
     el("ffo").checked = false; el("free").checked = true;
     return true;
   }
