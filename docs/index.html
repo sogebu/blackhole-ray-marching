@@ -40,6 +40,7 @@
   <label><input id="disk" type="checkbox"> <span data-t="disk">降着円盤</span> <span class="note" data-t="disknote">(Kepler 円盤 ISCO&ndash;12 r<sub>S</sub>)</span></label>
   <label><span data-t="inc">円盤の傾き</span> <span id="incval"></span>&deg;
     <input id="inc" type="range" min="0" max="89" step="1" value="80"></label>
+  <label><input id="ships" type="checkbox" checked> <span data-t="ships">他機</span> <span class="note" data-t="shipsnote">(r = 8 の円軌道を 1 機。像ごとに遅延・Doppler・円盤の遮蔽。<code>__bh.setShips</code> で差し替え)</span></label>
   <label><span data-t="mass">質量</span> <select id="mass">
       <option value="sun" data-t="sun">太陽</option>
       <option value="SgrA" selected>Sgr A*</option>
@@ -64,6 +65,7 @@
   </div>
 </div>
 <div id="hud"></div>
+<script src="ships.js"></script>
 <script>
 "use strict";
 // ---- language: ?lang=en|ja, else the browser's (ja* -> ja, otherwise en).
@@ -127,6 +129,8 @@ const I18N = {
     disk: "Accretion disk",
     disknote: "(Keplerian disk, ISCO&ndash;12 r<sub>S</sub>)",
     inc: "Disk inclination",
+    ships: "Other ships",
+    shipsnote: "(one ship on a circular orbit at r = 8; every image carries its delay, Doppler shift and the disk's occlusion; <code>__bh.setShips</code> replaces them)",
     mass: "Mass",
     sun: "Sun",
     massnote: "(sets only the time in seconds; the image does not change)",
@@ -233,6 +237,12 @@ uniform float uDiskAtabR;            // camera azimuth from the A tables at R_t 
 uniform float uDiskRmin;             // disk drawn for camera R > this (0 = always;
                                      // 1.52 = the pre-2026-10-13 photon-sphere gate)
 uniform int uDiskProbe;              // machine check: 1 = r, 2 = g, 3 = k + 1 of the hit
+// other ships (ships.js on the CPU, f64 reference renderer/ships.py): per
+// image the centre direction (camera frame) + in-plane angular radius, the
+// in-plane axis + transverse radius, the colour + g = omega_cam / omega_em
+const int NSHIP = 16;
+uniform int uNShip;
+uniform vec4 uShipA[NSHIP], uShipB[NSHIP], uShipC[NSHIP];
 uniform float uRref, uBsplit;        // far field: table end R_ref, table/turning split
 uniform vec3 uZd;                    // disk normal (world frame)
 uniform float uR, uTanHalf, uAspect;
@@ -904,6 +914,28 @@ void main(){
   float psiS = (fate == 0 || isnan(psi)) ? 0.0 : psi;
   vec3 sky = -cos(psiS) * aHat + sin(psiS) * p;
   vec3 col = uSkyImage ? skyImage(sky) : skyGrid(sky);
+  // ---- other ships: each image is a small ellipse on the camera's sky
+  // (centre uShipA.xyz, in-plane axis uShipB.xyz with the angular radii
+  // uShipA.w in the plane and uShipB.w across it), solved on the CPU in f64
+  // (ships.js: lensed position, delay, g, size, occlusion by the disk; the
+  // hidden images are not uploaded).  A hit paints the ship over the sky, the
+  // shadow and the disk (an image is a connecting ray: nothing is in front of
+  // it), shaded as a sphere by its limb and shifted by g with the sky's
+  // convention (chroma + g^4 + Reinhard).
+  for (int i = 0; i < NSHIP; ++i) {
+    if (i >= uNShip) break;
+    vec3 c0 = uShipA[i].xyz;
+    float ca = dot(dir, c0);
+    if (ca <= 0.0) continue;
+    vec3 eIn = uShipB[i].xyz;
+    float x = dot(dir, eIn) / (ca * uShipA[i].w), y = dot(dir, cross(c0, eIn)) / (ca * uShipB[i].w);
+    float q = x * x + y * y;
+    if (q <= 1.0) {
+      float gs = uShipC[i].w;
+      vec3 sc = dopplerShift(uShipC[i].xyz * (0.55 + 0.45 * sqrt(1.0 - q)), gs) * pow(gs, 4.0);
+      frag = vec4(sc / (1.0 + sc), 1.0); return;
+    }
+  }
   // far universe: warm counterpart (R/B swap) of render_interior.sky_color_III
   // (the offline renderers' orange marker retint has no web counterpart)
   if (fate == 3) col = col.bgr;
@@ -1182,6 +1214,10 @@ async function main(){
     R: R_DEFAULT, rHat: [0, 0, 1], hHat: [0, 1, 0],
     E: 0, L: 0, rd: 0, active: false, lastNow: performance.now(),
     timeDebt: 0, orbitLock: false, interior: false, message: "",
+    // the camera's clock for the other ships: ingoing Eddington-Finkelstein
+    // time v = t + r*, finite through the horizon (ships.py); advanced in
+    // coast() (pilot), fallStep() (closed form) and staticClock() (at rest)
+    v: 0,
   };
   const keys = new Set();
   // Verification knobs for the disk (no UI; __bh.set): diskAtabR = camera
@@ -1191,6 +1227,68 @@ async function main(){
   // camera R <= this (0 = draw from everywhere; 1.52 restores the photon-
   // sphere gate the viewer had until 2026-10-13).
   const diskKnobs = { diskAtabR: Infinity, diskRmin: 0 };
+
+  // ---- other ships (ships.js, f64 on the CPU; f64 reference renderer/ships.py).
+  // A ship is {id, traj, color, rho (proper radius, r_S), nMax (highest image
+  // order)}; traj is a worldline for BHShips.makeWorldline: {kind: "circular",
+  // r, normal, phase0, t0, sense}, {kind: "static", r, rhat}, {kind:
+  // "radialFall", R0, rhat, v0} or {kind: "samples", lam, t, pos} (the feed a
+  // multiplayer layer would supply).  Every frame updateShips solves each
+  // ship's images for the camera's event (clock camera.v) and frame, drops
+  // the images the disk hides or that froze at the horizon, and uploadShips
+  // sends up to NSHIP (16) ellipses to the shader, each at least SHIP_PX
+  // pixels across so a far ship stays a visible dot.
+  const ships = [];
+  let shipImages = [];
+  const SHIP_PX = 1.5;
+  function setShips(list){
+    ships.length = 0;
+    for (const s of list)
+      ships.push({ id: s.id, traj: s.traj, color: s.color || [1.0, 0.86, 0.62], rho: s.rho ?? 0.08,
+                   nMax: s.nMax ?? 1, wl: BHShips.makeWorldline(s.traj), lamGuess: [] });
+  }
+  // the default ship: a circular orbit at r = 8 in the world x-y plane (the
+  // disk's plane is tilted by the inclination slider, so the ship passes
+  // through the disk twice per orbit and is hidden behind it in between)
+  setShips([{ id: "ship1", traj: { kind: "circular", r: 8, normal: [0, 0, 1], phase0: 1.0 } }]);
+  function shipCamera(betaVec){
+    const flyIn = camera.active && camera.interior;
+    const interior = camera.R <= 1.0 || flyIn || (!camera.active && el("ffo").checked && camera.R < meta.R_min);
+    return { v: camera.v, R: camera.R, rhat: [...camera.rHat],
+             frame: interior ? (flyIn ? "lemaitre" : "ffo") : "static",
+             beta: (interior && !flyIn) ? [0, 0, 0] : [...betaVec] };
+  }
+  function updateShips(betaVec, inc){
+    shipImages = [];
+    if (!el("ships").checked) return;
+    const cam = shipCamera(betaVec);
+    const zd = el("disk").checked ? [0, Math.sin(inc), Math.cos(inc)] : null;
+    for (const s of ships) {
+      let ims = [];
+      try { ims = BHShips.viewShip(cam, s.wl, s.nMax, { rho: s.rho, diskNormal: zd, lamGuess: s.lamGuess }); }
+      catch (e) { console.warn("ship", s.id, e); }
+      for (const im of ims) {
+        s.lamGuess[im.n] = im.lam;
+        shipImages.push({ ship: s.id, n: im.n, dCam: im.dCam, eIn: im.eIn, aIn: im.aIn, aOut: im.aOut,
+                          g: im.g, color: s.color, lam: im.lam, tE: im.tE, rS: im.rS, dv: im.dv, chi: im.chi,
+                          b: im.b, hidden: im.hidden, frozen: im.frozen,
+                          drawn: !im.hidden && !im.frozen && im.aIn > 0 && im.g > 0 });
+      }
+    }
+  }
+  function uploadShips(pxAngle){
+    const drawn = shipImages.filter(s => s.drawn);
+    const n = Math.min(drawn.length, 16);
+    const A = new Float32Array(64), B = new Float32Array(64), C = new Float32Array(64);
+    for (let i = 0; i < n; i++) {
+      const s = drawn[i], floor = SHIP_PX * pxAngle;
+      A.set([s.dCam[0], s.dCam[1], s.dCam[2], Math.max(s.aIn, floor)], 4 * i);
+      B.set([s.eIn[0], s.eIn[1], s.eIn[2], Math.max(s.aOut, floor)], 4 * i);
+      C.set([s.color[0], s.color[1], s.color[2], s.g], 4 * i);
+    }
+    gl.uniform1i(U("uNShip"), n);
+    gl.uniform4fv(U("uShipA"), A); gl.uniform4fv(U("uShipB"), B); gl.uniform4fv(U("uShipC"), C);
+  }
 
   function viewBasis(){
     return { fwd: view.fwd, right: view.right, up: view.up };
@@ -1336,7 +1434,9 @@ async function main(){
     const L2 = camera.L * camera.L;
     return [rd,
       -1 / (2 * R * R) + L2 / (R * R * R) - 1.5 * L2 / (R * R * R * R),
-      camera.L / (R * R)];
+      camera.L / (R * R),
+      // dv/dtau = (E + rd)/A written regular at the horizon (ships.py)
+      (1 + L2 / (R * R)) / (camera.E - rd / Math.sqrt(R))];
   }
   function rotateAround(v, axis, angle){
     return add(add(scale(Math.cos(angle), v), scale(Math.sin(angle), cross(axis, v))),
@@ -1351,6 +1451,7 @@ async function main(){
     const Rnext = R + h / 6 * (k1[0] + 2 * k2[0] + 2 * k3[0] + k4[0]);
     const rdNext = rd + h / 6 * (k1[1] + 2 * k2[1] + 2 * k3[1] + k4[1]);
     const dPhi = h / 6 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
+    camera.v += h / 6 * (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3]);
     if (Rnext <= Rmin) {
       // the interior table's last row: the flight ends where the fall does
       camera.R = Rmin; camera.rd = rdNext;
@@ -1545,12 +1646,13 @@ async function main(){
 
   // ---- real-time free fall: r(tau) = (R0^{3/2} - (3/2) tau)^{2/3}
   // (memo FFO section; same closed form as render_fall_movie.py)
-  let falling = false, fallR32 = 0, fallTau = 0, fallLast = 0;
+  let falling = false, fallR32 = 0, fallTau = 0, fallLast = 0, fallV0 = 0, fallR0 = 1;
   function startFall(){
     const R = camera.R;                        // fall from where the camera is
     camera.active = false; camera.interior = false; el("free").checked = false;
     fallR32 = Math.pow(R, 1.5);
     fallTau = 0; fallLast = performance.now();
+    fallV0 = camera.v; fallR0 = R;             // v(r) is a closed form along the fall
     falling = true;
     el("ffo").checked = true;                 // 落下中は FFO frame
     el("fall").textContent = t("stop");
@@ -1581,6 +1683,18 @@ async function main(){
     }
     setSliderFromR(R);
     camera.R = R;
+    camera.v = fallV0 + BHShips.vFallRaw(R) - BHShips.vFallRaw(fallR0);
+  }
+  // At rest (the slider's camera, outside the horizon the static observer
+  // or, with the FFO box on, the faller it shows; inside, the faller) the
+  // clock still runs at the chosen rate, so the ships move past a camera
+  // that stands still
+  let clockLast = performance.now();
+  function staticClock(){
+    const now = performance.now();
+    const dt = Math.min(Math.max((now - clockLast) / 1000, 0), 0.1) * rateOf();
+    const R = camera.R;
+    camera.v += dt * ((R > 1 && !el("ffo").checked) ? BHShips.dvdtauRest(R) : BHShips.dvdtauFall(R));
   }
 
   // The slider always moves the camera (user 2026-10-13: while flying or
@@ -1608,7 +1722,7 @@ async function main(){
       }
       return;
     }
-    if (falling) { fallR32 = Math.pow(R, 1.5); fallTau = 0; fallLast = performance.now(); }
+    if (falling) { fallR32 = Math.pow(R, 1.5); fallTau = 0; fallLast = performance.now(); fallV0 = camera.v; fallR0 = R; }
     camera.R = R;
     camera.message = "";
   });
@@ -1855,7 +1969,50 @@ async function main(){
       draw(true);
       return out;
     },
+    // ships: setShips(list) replaces the ships (see setShips above), getShips()
+    // lists them, probeShips() draws once and returns, in check_ships.py's
+    // format, the camera event and frame the ships were solved for, every
+    // image's numbers (f64, from ships.js) and the pixel the shader painted at
+    // each image centre, so the f64 reference can be run on the same input.
+    setShips(list){ setShips(list); },
+    getShips(){ return ships.map(s => ({ id: s.id, traj: s.traj, color: s.color, rho: s.rho, nMax: s.nMax })); },
+    probeShips(o){
+      const saved = this.state();
+      if (o) this.set(o);
+      draw(true);
+      const w = canvas.width, h = canvas.height, b = viewBasis();
+      const th = Math.tan(parseFloat(el("fov").value) * Math.PI / 360);
+      const inc = parseFloat(el("inc").value) * Math.PI / 180;
+      const cam = shipCamera(lastBeta);
+      const px = new Uint8Array(4);
+      const pixelOf = d => {
+        const f = dot3(d, b.fwd);
+        if (f <= 0) return null;
+        return [Math.floor((dot3(d, b.right) / f / (th * w / h) + 1) / 2 * w), Math.floor((dot3(d, b.up) / f / th + 1) / 2 * h)];
+      };
+      const results = ships.map(s => {
+        const ims = shipImages.filter(q => q.ship === s.id);
+        const pixels = ims.map(q => {
+          const p = pixelOf(q.dCam);
+          if (!p || p[0] < 0 || p[0] >= w || p[1] < 0 || p[1] >= h) return { n: q.n, drawn: q.drawn, rgb: null };
+          gl.readPixels(p[0], p[1], 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+          const rgb = [px[0], px[1], px[2]];
+          // a control pixel 12 px below, where the (small) image is not
+          const cy = p[1] >= 12 ? p[1] - 12 : p[1] + 12;
+          gl.readPixels(p[0], cy, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+          return { n: q.n, drawn: q.drawn, xy: p, rgb, control: [px[0], px[1], px[2]] };
+        });
+        return { tag: s.id, images: ims, pixels };
+      });
+      const cases = ships.map(s => ({ tag: s.id, cam, traj: s.traj, nMax: s.nMax, rho: s.rho,
+                                      diskNormal: el("disk").checked ? [0, Math.sin(inc), Math.cos(inc)] : null }));
+      this.set(saved);
+      draw(true);
+      return { cases, results };
+    },
     set(o){
+      if (o.v !== undefined) camera.v = o.v;
+      if (o.ships !== undefined) el("ships").checked = o.ships;
       if (o.diskAtabR !== undefined) diskKnobs.diskAtabR = o.diskAtabR;
       if (o.diskRmin !== undefined) diskKnobs.diskRmin = o.diskRmin;
       if (o.Rslider !== undefined) {
@@ -1880,7 +2037,7 @@ async function main(){
       if (o.yaw !== undefined) yaw = o.yaw;
       if (o.pitch !== undefined) pitch = o.pitch;
     },
-    state(){ return { Rslider: el("R").value, R: camera.R, rHat: [...camera.rHat],
+    state(){ return { Rslider: el("R").value, R: camera.R, rHat: [...camera.rHat], v: camera.v, ships: el("ships").checked,
                       hHat: [...camera.hHat], E: camera.E, L: camera.L, rd: camera.rd,
                       active: camera.active, interior: camera.interior,
                       yaw, pitch,
@@ -1948,6 +2105,8 @@ async function main(){
     if (once !== true) {
       if (camera.active) flightStep(basis.fwd, basis.right);
       else fallStep();
+      if (!camera.active && !falling) staticClock();
+      clockLast = performance.now();
     }
     const R = camera.R;
     el("spdval").textContent = fmtRate();
@@ -1982,6 +2141,8 @@ async function main(){
     gl.uniform1f(U("uDiskAtabR"), Number.isFinite(diskKnobs.diskAtabR)
       ? Math.max(diskKnobs.diskAtabR, 2.5) : 1e30);
     gl.uniform1f(U("uDiskRmin"), diskKnobs.diskRmin);
+    updateShips(betaVec, inc);
+    uploadShips(Math.tan(fov * Math.PI / 360) * 2 / h);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
     frames++;
@@ -2011,6 +2172,7 @@ async function main(){
       ? t("noStatic") + "   " : "";
     document.getElementById("hud").textContent = hudPre + frameNote +
       (camera.message ? camera.message + "   " : "") +
+      `v = ${camera.v.toFixed(1)} rS/c   ` +
       `fps = ${fps.toFixed(0)}   ` +
       `f32 lookup err ~ ${meta.f32_bilinear_vs_exact_rad.toExponential(1)} rad`;
     if (once !== true) requestAnimationFrame(draw);
