@@ -2,77 +2,304 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#000000">
 <title>Schwarzschild real-time viewer</title>
 <style>
-  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
-               font: 13px/1.4 -apple-system, "Hiragino Sans", sans-serif; }
-  #gl { width: 100vw; height: 100vh; display: block; cursor: grab; }
-  #panel { position: fixed; top: 10px; left: 10px; color: #ddd;
-           background: rgba(10,14,24,.72); padding: 10px 14px;
-           border-radius: 8px; user-select: none; max-width: 540px; }
-  #panel label { display: block; margin: 4px 0; }
-  #hud { position: fixed; bottom: 10px; left: 10px; color: #cfd6e4;
-         background: rgba(10,14,24,.6); padding: 6px 10px; border-radius: 6px;
-         font-variant-numeric: tabular-nums; }
-  input[type=range] { width: 190px; vertical-align: middle; }
-  .note { color: #8a93a6; font-size: 11px; }
-  .note a { color: #a9b8d6; }
-  #skycredit { max-width: 360px; margin: 0 0 4px; }
-  #lang { color: #a9b8d6; margin-left: 6px; }
-  #fold { float: right; margin-left: 10px; }
-  #panel.folded #panelbody, #panel.folded [data-t="tagline"], #panel.folded #lang { display: none; }
+  /* The UI (DESIGN.md "UI の作り直し", 2026-10-29): one dark translucent
+     panel over the picture.  What one chooses most (observer, position R,
+     fall, time rate, disk) is in front; the rest is one step behind ("表示と
+     設定"); developer numbers are off by default.  The mutually exclusive
+     observers are one segmented control; the HUD is labelled number cards.
+     Every text colour keeps WCAG AA (>= 4.5:1) even over a white sky behind
+     the 86 % panel (the table in DESIGN.md).  No web fonts, no backdrop blur
+     (the canvas redraws every frame behind it).  Phones: the panel is a sheet
+     at the bottom, the HUD sits at the top, targets are 44 px. */
+  :root {
+    --fs: 15px;
+    --panel: rgba(13, 17, 26, .86);
+    --solid: #0d111a;
+    --line: rgba(255, 255, 255, .16);
+    --text: #eef2f8;
+    --text2: #c9d0db;
+    --muted: #a3acbb;
+    --accent: #8cb8ff;
+    --accent-bg: #2e5aa3;
+    --focus: #ffd166;
+    --warn: #ffd27a;
+    --kbd: #1e2535;
+    --kbd-line: #56617a;
+    --ctl: 2.25rem;              /* height of a control */
+    --edge: 12px;
+    --hud-h: 0px;                /* set by the page (ResizeObserver) */
+    --sheet-h: 0px;
+    --credit-h: 0px;
+    color-scheme: dark;
+  }
+  @media (pointer: coarse) { :root { --fs: 16px; --ctl: 2.75rem; } }   /* 44 px targets */
+  html.big { --fs: 19px; }       /* large text for a projector */
+  html { font-size: var(--fs); }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; overscroll-behavior: none; }
+  body { color: var(--text); -webkit-text-size-adjust: 100%;
+         font: 1rem/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
+               "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", Meiryo, system-ui, sans-serif; }
+  #gl { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; display: block;
+        cursor: grab; touch-action: none; }
+  #gl:active { cursor: grabbing; }
+  [hidden] { display: none !important; }
+  :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  a { color: var(--accent); }
+  button, select { font: inherit; color: var(--text); background: #1c2434; border: 1px solid var(--line);
+                   border-radius: 8px; min-height: var(--ctl); padding: 0 .8rem; cursor: pointer; }
+  button:hover, select:hover { background: #26324a; }
+  button.primary { background: var(--accent-bg); border-color: transparent; font-weight: 600; }
+  button.primary:hover { background: #3768b8; }
+  button.icon { min-width: var(--ctl); padding: 0 .45rem; font-weight: 700; }
+  #fold::before { content: "▴"; }                        /* the panel folds up to its title bar */
+  #fold[aria-expanded="false"]::before { content: "▾"; }
+  input[type=range] { display: block; width: 100%; height: var(--ctl); margin: 0; accent-color: var(--accent); cursor: pointer; }
+  input[type=checkbox] { width: 1.15rem; height: 1.15rem; margin: 0; flex: none; accent-color: var(--accent); }
+  kbd { display: inline-block; min-width: 1.6em; padding: 0 .35em; border: 1px solid var(--kbd-line);
+        border-bottom-width: 2px; border-radius: 5px; background: var(--kbd); color: var(--text);
+        font: 600 .78rem/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-align: center; }
+  output { font-variant-numeric: tabular-nums; }
+
+  /* ---- the panel */
+  #panel { position: fixed; top: max(var(--edge), env(safe-area-inset-top)); left: max(var(--edge), env(safe-area-inset-left));
+           width: 22rem; max-width: calc(100vw - 2 * var(--edge));
+           max-height: calc(100vh - 3 * var(--edge) - var(--hud-h)); overflow: auto; overscroll-behavior: contain;
+           background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+           box-shadow: 0 10px 30px rgba(0, 0, 0, .45); user-select: none; -webkit-user-select: none; }
+  .ph { display: flex; align-items: center; gap: .35rem; padding: .45rem .45rem .45rem .9rem; }
+  .ph h1 { flex: 1; margin: 0; font-size: 1rem; font-weight: 700; white-space: nowrap; }
+  #lang { display: inline-flex; align-items: center; min-height: var(--ctl); padding: 0 .45rem; font-size: .85rem; }
+  #panelbody { display: grid; gap: 1rem; padding: .2rem .9rem .9rem; }
+  #panel.folded #panelbody { display: none; }
+  fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
+  legend, .lbl { padding: 0; font-size: .8rem; font-weight: 600; color: var(--muted); }
+  legend { margin-bottom: .35rem; }
+  .hint { margin: .35rem 0 0; font-size: .8rem; color: var(--muted); }
+  /* the observer: native radios (arrow keys move the choice) drawn as segments */
+  .seg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; padding: 3px;
+         background: rgba(0, 0, 0, .35); border: 1px solid var(--line); border-radius: 10px; }
+  .seg input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  .seg label { display: flex; align-items: center; justify-content: center; min-height: var(--ctl); padding: 0 .2rem;
+               border-radius: 7px; font-size: .88rem; font-weight: 600; line-height: 1.15; text-align: center;
+               color: var(--text2); cursor: pointer; }
+  .seg label:hover { background: rgba(255, 255, 255, .07); }
+  .seg input:checked + label { background: var(--accent-bg); color: #fff; }
+  .seg input:focus-visible + label { outline: 2px solid var(--focus); outline-offset: 1px; }
+  .seg input:disabled + label { color: #8a93a3; cursor: not-allowed; }
+  .row { display: flex; align-items: baseline; gap: .35rem; }
+  .row > .lbl { flex: 1; }
+  .val { font-size: 1.25rem; font-weight: 700; }
+  .unit { font-size: .85rem; color: var(--text2); }
+  .scale { position: relative; height: 1.1rem; font-size: .72rem; color: var(--muted); }
+  .scale span { position: absolute; top: 0; white-space: nowrap; }
+  .scale .s1 { left: calc(60% - 1.6px); transform: translateX(-50%); color: var(--text2); }   /* R = 1 sits at 3/5 of the log slider */
+  .scale .s2 { right: 0; }
+  .floor { margin-top: .45rem; padding: .5rem .65rem; border-left: 3px solid var(--warn); border-radius: 6px;
+           background: rgba(255, 210, 122, .1); font-size: .85rem; }
+  .floor button { margin-top: .45rem; }
+  .act { display: grid; grid-template-columns: auto 1fr; gap: .8rem; align-items: center; }
+  .check { display: flex; align-items: center; gap: .55rem; min-height: var(--ctl); cursor: pointer; }
+  details > summary { display: flex; align-items: center; gap: .45rem; min-height: var(--ctl); cursor: pointer;
+                      list-style: none; font-weight: 600; color: var(--text2); }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before { content: "▸"; color: var(--muted); }
+  details[open] > summary::before { content: "▾"; }
+  .set { display: grid; gap: .75rem; padding-top: .35rem; }
+  .set select { width: 100%; }
+  .keys { display: flex; flex-wrap: wrap; gap: 0 .9rem; margin: 0; font-size: .8rem; line-height: 2.1; color: var(--text2); }
+  .keys > span { white-space: nowrap; }
+
+  /* ---- the HUD: labelled number cards */
+  #hud { position: fixed; left: max(var(--edge), env(safe-area-inset-left)); bottom: max(var(--edge), env(safe-area-inset-bottom));
+         display: flex; flex-wrap: wrap; align-items: stretch; gap: .4em; font-size: 1rem;
+         max-width: calc(100vw - 3 * var(--edge) - min(24rem, 40vw)); pointer-events: none; }
+  /* sizes in em: the photo view enlarges the whole HUD through its font-size */
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: .65em; padding: .3em .7em .4em; }
+  .card .k { display: block; font-size: .72em; color: var(--muted); white-space: nowrap; }
+  .card .v { display: block; font-size: 1.1em; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .card .s { display: block; font-size: .78em; color: var(--text2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .card.dev .v { font-size: .8em; font-weight: 400; }
+  .badge { display: inline-block; margin-left: .35em; padding: 0 .4em; border-radius: 4px; background: #6b1e2c;
+           color: #ffe1e6; font-size: .65em; font-weight: 700; vertical-align: .15em; }
+  #msg { position: fixed; top: max(var(--edge), env(safe-area-inset-top)); right: max(var(--edge), env(safe-area-inset-right));
+         max-width: min(26rem, calc(100vw - 22rem - 3 * var(--edge))); padding: .55rem .85rem;
+         background: rgba(13, 17, 26, .92); border: 1px solid var(--line); border-left: 3px solid var(--accent);
+         border-radius: 10px; font-size: .88rem; pointer-events: none; }
+  #msg:empty { display: none; }
+  #skycredit { position: fixed; right: max(var(--edge), env(safe-area-inset-right)); bottom: max(var(--edge), env(safe-area-inset-bottom));
+               max-width: min(24rem, 40vw); margin: 0; padding: .3rem .6rem; background: var(--panel);
+               border: 1px solid var(--line); border-radius: 8px; font-size: .72rem; color: var(--text2); text-align: right; }
+  #uihint { position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%); padding: .35rem .8rem;
+            background: rgba(13, 17, 26, .92); border: 1px solid var(--line); border-radius: 999px;
+            font-size: .85rem; pointer-events: none; }
+  /* ---- the first-visit card "how to fly" */
+  #help { width: min(34rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); box-sizing: border-box;
+          padding: 1.1rem 1.3rem 1.2rem; color: var(--text); background: var(--solid);
+          border: 1px solid var(--line); border-radius: 16px; }
+  #help::backdrop { background: rgba(0, 0, 0, .5); }
+  #help h2 { margin: 0 0 .8rem; font-size: 1.2rem; }
+  #help form { margin: 1rem 0 0; }
+  .kgrid { display: grid; grid-template-columns: auto 1fr; gap: .6rem 1rem; margin: 0 0 .8rem; align-items: baseline; }
+  .kgrid dt { white-space: nowrap; }
+  .kgrid dd { margin: 0; color: var(--text2); }
+  .touch-only { display: none; }
+  @media (hover: none) and (pointer: coarse) {
+    .kbd-only { display: none; }
+    dl.touch-only { display: grid; }
+  }
+  /* ---- H: no UI at all; P: the photo view (a larger HUD, then none) */
+  html.ui-off #panel, html.ui-off #hud, html.ui-off #msg, html.ui-off #skycredit { display: none; }
+  html.photo #panel, html.photo #msg, html.photo #skycredit, html.photo .card.dev { display: none; }
+  html.photo #hud { font-size: 1.5rem; max-width: calc(100vw - 2 * var(--edge)); }
+  html.photo .card { background: rgba(0, 0, 0, .8); }
+  html.photo.nohud #hud { display: none; }
+  /* ---- phones: the panel is a sheet at the bottom, the HUD at the top */
+  @media (max-width: 640px) {
+    #panel { top: auto; left: 0; right: 0; bottom: 0; width: auto; max-width: none;
+             max-height: 40vh; max-height: 40dvh; border-radius: 16px 16px 0 0; border-bottom: 0;
+             padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+    #hud { top: max(8px, env(safe-area-inset-top)); bottom: auto; left: max(8px, env(safe-area-inset-left));
+           right: max(8px, env(safe-area-inset-right)); max-width: none; gap: .3rem; }
+    .card { padding: .2em .5em .3em; }
+    .card .v { font-size: .98em; }
+    /* the credit and the messages go under the HUD: the picture's centre
+       (the hole) must stay clear between the HUD and the sheet */
+    #skycredit { top: calc(max(8px, env(safe-area-inset-top)) + var(--hud-h) + 6px); bottom: auto; right: 8px;
+                 max-width: calc(100vw - 16px); font-size: .68rem; }
+    #msg { top: calc(max(8px, env(safe-area-inset-top)) + var(--hud-h) + var(--credit-h) + 12px);
+           left: 8px; right: 8px; max-width: none; }
+    #uihint { bottom: calc(var(--sheet-h) + 3rem); }
+    #fold::before { content: "▾"; }                      /* the sheet folds down */
+    #fold[aria-expanded="false"]::before { content: "▴"; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    #panel, #msg { transition: opacity .15s ease; }
+  }
 </style>
 </head>
 <body>
-<canvas id="gl" tabindex="0"></canvas>
-<div id="panel">
-  <button id="fold">畳む (H)</button>
-  <b>Schwarzschild viewer</b> <span class="note" data-t="tagline">(f32 lookup、horizon 貫通対応)</span>
-  <a id="lang" class="note" href="?lang=en">English</a>
-  <div id="panelbody">
-  <label>R = <span id="Rval"></span> r<sub>S</sub> <span class="note" data-t="rnote">(スライダは 0.001〜100、飛行に上限なし)</span><br>
-    <input id="R" type="range" min="0" max="1" step="any"></label>
-  <label><input id="ffo" type="checkbox" checked> <span data-t="ffo">自由落下カメラ (FFO)</span></label>
-  <label><input id="free" type="checkbox"> <span data-t="free">自由飛行</span> <span class="note" data-t="freenote">(地平面の内側まで。内側は自由落下系が基準、推力は E・L を変える)</span></label>
-  <label><button id="orbit" data-t="orbit">C: 円軌道</button> <button id="hover"><span data-t="hover">0: 静止</span> <span class="note" data-t="hovernote">(内側は E = 0)</span></button></label>
-  <label hidden><input id="dop" type="checkbox"> <span data-t="dop">ドップラー効果</span> <span class="note" data-t="dopnote">(色 + 明るさ g&#8308;)</span></label>
-  <label><input id="eternal" type="checkbox"> <span data-t="eternal">永久 BH</span> <span class="note" data-t="eternalnote">(あの世 mode、現実の BH は崩壊型 = OFF)</span></label>
-  <label><input id="disk" type="checkbox"> <span data-t="disk">降着円盤</span> <span class="note" data-t="disknote">(Kepler 円盤 ISCO&ndash;12 r<sub>S</sub>)</span></label>
-  <label><span data-t="inc">円盤の傾き</span> <span id="incval"></span>&deg;
-    <input id="inc" type="range" min="0" max="89" step="1" value="80"></label>
-  <label><input id="ships" type="checkbox" checked> <span data-t="ships">他機</span> <span class="note" data-t="shipsnote">(r = 8 の円軌道を 1 機。像ごとに遅延・Doppler・円盤の遮蔽。<code>__bh.setShips</code> で差し替え)</span></label>
-  <label><span data-t="mass">質量</span> <select id="mass">
-      <option value="sun" data-t="sun">太陽</option>
-      <option value="SgrA" selected>Sgr A*</option>
-      <option value="M87">M87*</option>
-    </select> <span class="note" data-t="massnote">(時間の秒換算のみ、絵は不変)</span></label>
-  <label><span data-t="sky">空</span> <select id="sky">
-      <option value="milkyway" selected data-t="milkyway">天の川 (Gaia の実データ)</option>
-      <option value="grid" data-t="grid">格子 (15&deg; ごと)</option>
-    </select> <span id="skynote" class="note"></span></label>
-  <div id="skycredit" class="note"><span data-t="skyimage">天の川の画像:</span>
-    <a href="https://commons.wikimedia.org/wiki/File:Milkyway360-latlon-32kscaled8k-4200k-m14-s4-g1.png" target="_blank" rel="noopener">Kevin M. Loch</a>
-    (bsrender<span data-t="comma">、</span>ESA Gaia EDR3)<span data-t="comma">、</span>
-    <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener">CC BY-SA 4.0</a><span data-t="comma">、</span>
-    <span data-t="skyview">縮小して使用。初期視点では BH が銀河の回転の向き (l = 90&deg;) の銀河面 30&deg; 上、銀河中心は右手 90&deg;。</span></div>
-  <label>fov <span id="fovval"></span>&deg;
-    <input id="fov" type="range" min="30" max="150" step="1" value="100"></label>
-  <label><button id="fall">▶ 自由落下</button>
-    <span class="note"><span data-t="tau">固有時間</span> ×<span id="spdval"></span></span>
-    <input id="spd" type="range" min="0" max="1" step="any" value="0.5"
-           style="width:110px"></label>
-  <div class="note" data-t="help">drag・矢印: 自分の周りを見回し / wheel: fov / 自由飛行: W/S 前後、A/D 左右（離すと減速）／固有時間は選んだ質量の実時間 ×倍率（既定 1）で進む</div>
+<canvas id="gl" tabindex="0" aria-label="ブラックホールの視界。ドラッグか矢印キーで見回す" data-tl="canvasLabel"></canvas>
+<aside id="panel" aria-label="操作パネル" data-tl="panelLabel">
+  <div class="ph">
+    <h1>Schwarzschild viewer</h1>
+    <a id="lang" href="?lang=en">English</a>
+    <button id="helpbtn" class="icon" aria-label="飛び方 (?)" data-tl="helpLabel" aria-haspopup="dialog">?</button>
+    <button id="fold" class="icon" aria-expanded="true" aria-controls="panelbody" aria-label="パネルを畳む" data-tl="foldLabel"></button>
   </div>
+  <div id="panelbody">
+    <fieldset>
+      <legend data-t="observer">観測者</legend>
+      <div class="seg">
+        <input type="radio" name="mode" id="mStatic" value="static"><label for="mStatic" data-t="mStatic">静止</label>
+        <input type="radio" name="mode" id="mFall" value="freefall" checked><label for="mFall" data-t="mFall">自由落下</label>
+        <input type="radio" name="mode" id="mOrbit" value="orbit"><label for="mOrbit" data-t="mOrbit">円軌道</label>
+        <input type="radio" name="mode" id="mPilot" value="pilot"><label for="mPilot" data-t="mPilot">自由飛行</label>
+      </div>
+      <p id="modehint" class="hint"></p>
+    </fieldset>
+    <div>
+      <div class="row"><label class="lbl" for="R" data-t="pos">位置 R</label>
+        <output id="Rval" class="val" for="R"></output> <span class="unit">r<sub>S</sub></span></div>
+      <input id="R" type="range" min="0" max="1" step="any" aria-describedby="floor">
+      <div class="scale" aria-hidden="true"><span>0.001</span><span class="s1" data-t="horizonTick">1 = 地平面</span><span class="s2">100</span></div>
+      <div id="floor" class="floor" role="status" hidden><span id="floormsg"></span><br><button id="floorgo"></button></div>
+    </div>
+    <div class="act">
+      <button id="fall" class="primary">▶ 自由落下</button>
+      <div>
+        <div class="row"><label class="lbl" for="spd" data-t="rate">時間の速さ</label> <output id="spdval" for="spd"></output></div>
+        <input id="spd" type="range" min="0" max="1" step="any" value="0.5" aria-describedby="spdnote">
+        <div id="spdnote" class="hint"></div>
+      </div>
+    </div>
+    <div>
+      <label class="check"><input id="disk" type="checkbox"> <span data-t="disk">降着円盤</span></label>
+      <div id="incrow" hidden>
+        <div class="row"><label class="lbl" for="inc" data-t="inc">円盤の傾き</label> <output id="incval" for="inc"></output>&deg;</div>
+        <input id="inc" type="range" min="0" max="89" step="1" value="80">
+      </div>
+    </div>
+    <details id="more">
+      <summary data-t="more">表示と設定</summary>
+      <div class="set">
+        <div><div class="row"><label class="lbl" for="fov" data-t="fovl">視野角</label> <output id="fovval" for="fov"></output>&deg;</div>
+          <input id="fov" type="range" min="30" max="150" step="1" value="100"></div>
+        <div><label class="lbl" for="sky" data-t="sky">空</label>
+          <select id="sky">
+            <option value="milkyway" selected data-t="milkyway">天の川 (Gaia の実データ)</option>
+            <option value="grid" data-t="grid">格子 (15&deg; ごと)</option>
+          </select> <span id="skynote" class="hint"></span>
+          <p class="hint" data-t="skyview">初期視点では穴は銀河の回転の向き (l = 90&deg;) の銀河面 30&deg; 上にあり、銀河中心は右手 90&deg;。</p></div>
+        <div><label class="lbl" for="mass" data-t="mass">質量</label>
+          <select id="mass">
+            <option value="sun" data-t="sun">太陽</option>
+            <option value="SgrA" selected>Sgr A*</option>
+            <option value="M87">M87*</option>
+          </select>
+          <p class="hint" data-t="massnote">時間を秒に換算するためだけ。絵は変わらない。</p></div>
+        <div><label class="check"><input id="eternal" type="checkbox"> <span data-t="eternal">永久ブラックホール</span></label>
+          <p class="hint" data-t="eternalnote">向こう側の宇宙まで見える理想化。崩壊でできた現実の穴は OFF。</p></div>
+        <div><label class="check"><input id="ships" type="checkbox" checked> <span data-t="ships">他機</span></label>
+          <p class="hint" data-t="shipsnote">r = 8 の円軌道を回る 1 機。像ごとに光の遅れ・ドップラー・円盤の陰がつく。</p></div>
+        <label class="check" hidden><input id="dop" type="checkbox"> <span data-t="dop">ドップラー効果</span> <span class="hint" data-t="dopnote">(色 + 明るさ g&#8308;)</span></label>
+        <label class="check"><input id="big" type="checkbox"> <span data-t="big">文字を大きく (投影用)</span></label>
+        <div><button id="photo" data-t="photoBtn">撮影向けの表示 (P)</button>
+          <p class="hint" data-t="photonote">パネルを消して計器を大きく。もう一度 P で計器も消す、Esc で戻る。</p></div>
+        <label class="check"><input id="dev" type="checkbox"> <span data-t="dev">開発用の数値 (fps・f32 の誤差・時計)</span></label>
+      </div>
+    </details>
+    <p class="keys kbd-only"><span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> <span data-t="kThrust">推力</span></span>
+      <span><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> <span data-t="kLook">見回す</span></span>
+      <span><kbd>H</kbd> <span data-t="kHide">UI を消す</span></span> <span><kbd>?</kbd> <span data-t="kHelp">飛び方</span></span></p>
+  </div>
+</aside>
+<div id="hud" aria-label="計器" data-tl="hudLabel">
+  <div class="card"><span class="k" data-t="hObs">観測者</span><span class="v" id="hObs"></span></div>
+  <div class="card"><span class="k" id="hRk"></span><span class="v"><span id="hR"></span> <span class="unit">r<sub>S</sub></span><span id="hIn" class="badge" hidden></span></span></div>
+  <div class="card" id="cTau"><span class="k" id="hTauK"></span><span class="v" id="hTau"></span><span class="s" id="hTauS"></span></div>
+  <div class="card" id="cBeta"><span class="k" id="hBetaK"></span><span class="v" id="hBeta"></span><span class="s" id="hGam"></span></div>
+  <div class="card" id="cE" hidden><span class="k">E</span><span class="v" id="hE"></span></div>
+  <div class="card" id="cL" hidden><span class="k">L</span><span class="v" id="hL"></span></div>
+  <div class="card dev" id="cDev" hidden><span class="k" data-t="devk">開発用</span><span class="v" id="hDev"></span></div>
 </div>
-<div id="hud"></div>
+<div id="msg" role="status" aria-live="polite"></div>
+<p id="skycredit"><span data-t="skyimage">天の川:</span>
+  <a href="https://commons.wikimedia.org/wiki/File:Milkyway360-latlon-32kscaled8k-4200k-m14-s4-g1.png" target="_blank" rel="noopener">Kevin M. Loch</a>
+  (bsrender<span data-t="comma">、</span>ESA Gaia EDR3)<span data-t="comma">、</span>
+  <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener">CC BY-SA 4.0</a><span data-t="comma">、</span><span data-t="downscaled">縮小して使用</span></p>
+<div id="uihint" role="status" hidden></div>
+<dialog id="help" aria-labelledby="helptitle">
+  <h2 id="helptitle" data-t="helpTitle">飛び方</h2>
+  <dl class="kgrid kbd-only">
+    <dt><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></dt><dd data-t="hThrust">推力 (前・左・後ろ・右)。離すと静止に戻る (地平面の内側では慣性で進む)。</dd>
+    <dt><kbd>←</kbd> <kbd>↑</kbd> <kbd>↓</kbd> <kbd>→</kbd></dt><dd data-t="hLook">見回す (ドラッグでも)。ホイールで視野角。</dd>
+    <dt><kbd>0</kbd> <kbd>C</kbd></dt><dd data-t="hModes">静止 · 円軌道。</dd>
+    <dt><kbd>H</kbd> <kbd>P</kbd></dt><dd data-t="hHide">UI をすべて消す · 撮影向けの表示。</dd>
+    <dt><kbd>?</kbd> <kbd>Esc</kbd></dt><dd data-t="hHelp">この説明 · 閉じて画面に戻る。</dd>
+  </dl>
+  <dl class="kgrid touch-only">
+    <dt data-t="tDrag">ドラッグ</dt><dd data-t="tLook">見回す。</dd>
+    <dt data-t="tSheet">下のパネル</dt><dd data-t="tSheetDo">観測者と位置 R を選ぶ。</dd>
+    <dt data-t="tThrust">推力</dt><dd data-t="tThrustDo">キーボードの W/A/S/D (スマホの推力は次の版)。</dd>
+  </dl>
+  <p class="hint" data-t="hObserver">観測者が替わるのは、パネルで選んだときと、飛ぶ・回る・落ちる操作のときだけ。位置 R のスライダは今の観測者を動かすだけで、静止の観測者は地平面の直上 R = 1.02 で止まる (地平面の内側へは自由落下で)。</p>
+  <form method="dialog"><button class="primary" data-t="helpOk">はじめる</button></form>
+</dialog>
 <script src="ships.js"></script>
 <script>
 "use strict";
 // ---- language: ?lang=en|ja, else the browser's (ja* -> ja, otherwise en).
-// The Japanese panel text is the markup itself; with LANG = en every
-// [data-t] element takes I18N.en[key].  Strings written at run time (HUD,
-// camera messages, the fall button) come from t(key, ...args) in both
-// languages.  The link next to the title reloads the page in the other one.
+// The Japanese text is the markup itself; with LANG = en every [data-t]
+// element takes I18N.en[key] as its content, [data-tl] as its aria-label and
+// [data-tt] as its title.  Strings written at run time (HUD, camera
+// messages, the fall button) come from t(key, ...args) in both languages
+// (check_i18n.py checks that every key exists in both).  The link next to
+// the title reloads the page in the other one.
 const LANG = (() => {
   const q = new URLSearchParams(location.search).get("lang");
   if (q === "en" || q === "ja") return q;
@@ -88,63 +315,101 @@ const I18N = {
       "renderer/web で python3 export_table.py を回し直してください",
     skyLoading: "読み込み中…",
     skyFailed: "画像を読み込めませんでした",
-    rate1: (mass, unit) => `1（${mass} の実時間、${unit}）`,
-    rateUp: (m, mass) => `${m}（${mass} の実時間の ${m} 倍速）`,
-    rateDown: (m, mass, inv) => `${m}（${mass} の実時間の 1/${inv}）`,
+    rateNote1: (mass, unit) => `${mass} の実時間 (${unit})`,
+    rateNoteUp: (m, mass) => `${mass} の実時間の ${m} 倍`,
+    rateNoteDown: (mass, inv) => `${mass} の実時間の 1/${inv}`,
     min: "分", hour: "時間", day: "日",
-    fall: "▶ 自由落下", stop: "■ 停止",
-    fold: "畳む (H)", unfold: "開く (H)",
-    endDeep: "r = 0.001 rS（interior table の下端）で飛行終了",
-    endGamma: (r, g) => `r = ${r} rS: 自由落下系に対する速度が光速に近づき (γ > ${g})、表示の限界で飛行終了`,
-    noFlyDeep: "r = 0.001 rS（table の下端）からは飛べません",
-    flyInside: "地平面の近く／内側: 自由落下系に静止して開始（推力は E・L を変える）",
-    flyHere: "現在位置で自由飛行を開始（重力補償中）",
-    flyFromFall: "現在位置で自由飛行を開始（自由落下の速度から。離すと静止に戻る）",
-    flyInsideStatic: "地平面の直上: 静止の速度から開始（ここでは静止を保てない。推力は E・L を変える）",
-    orbitMin: "C の安定円軌道は R > 3 rS で使えます",
+    fall: "▶ 自由落下", stop: "■ 止める",
+    foldLabel: "パネルを畳む", unfoldLabel: "パネルを開く",
+    endDeep: "r = 0.001 rS (表の下端) で飛行を終えました",
+    endGamma: (r, g) => `r = ${r} rS: 自由落下系に対する速さが光速に近づき (γ > ${g})、表示の限界で飛行を終えました`,
+    noFlyDeep: "r = 0.001 rS (表の下端) からは飛べません",
+    flyInside: "地平面の近く／内側: 自由落下系に静止して飛び始めました (推力は E・L を変える)",
+    flyHere: "ここから自由飛行 (重力補償中)",
+    flyFromFall: "ここから自由飛行 (自由落下の速度から。離すと静止に戻る)",
+    flyInsideStatic: "地平面の直上: 静止の速度から飛び始めました (ここでは静止を保てない。推力は E・L を変える)",
+    orbitMin: "安定な円軌道は R > 3 rS で選べます",
     orbitOn: "円軌道に入りました",
-    restInside: "t と φ で静止（E = 0, L = 0）= 内側で最も長く生きる落下",
+    orbitToFly: "円軌道の速度のまま自由飛行へ",
+    restInside: "t と φ で静止 (E = 0, L = 0) = 内側で最も長く生きる落下",
     noHover: "地平面の直上 (1 ≤ R < 1.02) では静止できません",
-    hovering: "静止（重力補償中）",
-    sliderStatic: "R < 1.02 rS: スライダでは静止カメラ（自由飛行を終了）",
-    sliderMove: "スライダの R へ移動（静止、重力補償中）",
-    flyPaused: "自由飛行を一時停止",
-    hudFlyIn: "自由飛行（自由落下系基準）",
-    hudFly: "自由飛行",
+    hovering: "静止 (重力補償中)",
     noStatic: "地平面の内側では静止できないので自由落下の視界",
+    nameStatic: "静止の観測者", nameFall: "自由落下の観測者 (E = 1)",
+    nameOrbit: "円軌道 (測地線)", namePilot: "操縦者 (推力)",
+    floorStatic: "静止の観測者は R = 1.02 rS まで (その内側では静止を保てず、地平面の内側には存在しない)。内側へは自由落下で。",
+    floorOrbit: "安定な円軌道は R > 3 rS だけ。",
+    toFall: "自由落下に切り替える", toStatic: "静止に切り替える",
+    obsToStatic: "観測者を静止に切り替えました", obsToFall: "観測者を自由落下に切り替えました",
+    noStaticHere: "R < 1.02 rS には静止の観測者がいません (地平面の内側には存在しない)",
+    sliderToStatic: "スライダ: 操縦者を静止系で止めました (静止の観測者)",
+    sliderToFall: "スライダ: 操縦者を自由落下系で止めました (自由落下の観測者)",
+    descStatic: "ロケットで重力に逆らって止まっている観測者 (R ≥ 1.02)。",
+    descFall: "無限遠の静止から真っすぐ落ちる観測者 (E = 1)。▶ で落ちる。",
+    descOrbit: "安定な円軌道を回る観測者 (R > 3)。",
+    descPilot: "W/A/S/D の推力で飛ぶ。離すと静止に戻る (地平面の内側では慣性で進む)。",
+    offStatic: "静止は R ≥ 1.02 で選べる。", offOrbit: "円軌道は R > 3 で選べる。",
+    pilotTouch: "推力はキーボードの W/A/S/D (スマホの推力は次の版)",
+    hudPos: "位置 R", hudPosIn: "位置 r", inside: "地平面の内側",
+    tauHor: "地平面まで", tauHorIf: "落ちれば地平面まで",
+    tauSing: "特異点まで", tauSingCoast: "慣性で特異点まで",
+    betaStatic: "速さ (静止系に対して)", betaFall: "速さ (自由落下系に対して)",
+    falling: "落下中",
+    uiOffHint: "H で表示を戻す",
+    photoHint1: "撮影向けの表示: P で計器も消す · Esc で戻る",
+    photoHint2: "撮影向けの表示 (計器なし): P か Esc で戻る",
   },
   en: {
-    tagline: "(f32 lookup, through the horizon)",
-    rnote: "(slider 0.001&ndash;100; no upper limit in flight)",
-    ffo: "Free-fall camera (FFO)",
-    free: "Free flight",
-    freenote: "(down through the horizon; inside, the free-fall frame is the reference and thrust changes E and L)",
-    orbit: "C: circular orbit",
-    hover: "0: hover",
-    hovernote: "(inside: E = 0)",
-    dop: "Doppler effect",
-    dopnote: "(color + brightness g&#8308;)",
-    eternal: "Eternal BH",
-    eternalnote: "(shows the far exterior; a real, collapse-formed BH = OFF)",
+    canvasLabel: "View near the black hole. Drag or use the arrow keys to look around",
+    panelLabel: "Controls",
+    helpLabel: "How to fly (?)",
+    hudLabel: "Instruments",
+    observer: "Observer",
+    mStatic: "Static", mFall: "Free fall", mOrbit: "Orbit", mPilot: "Free flight",
+    pos: "Position R",
+    horizonTick: "1 = horizon",
+    rate: "Time rate",
     disk: "Accretion disk",
-    disknote: "(Keplerian disk, ISCO&ndash;12 r<sub>S</sub>)",
     inc: "Disk inclination",
-    ships: "Other ships",
-    shipsnote: "(one ship on a circular orbit at r = 8; every image carries its delay, Doppler shift and the disk's occlusion; <code>__bh.setShips</code> replaces them)",
-    mass: "Mass",
-    sun: "Sun",
-    massnote: "(sets only the time in seconds; the image does not change)",
+    more: "View and settings",
+    fovl: "Field of view",
     sky: "Sky",
     milkyway: "Milky Way (real Gaia data)",
     grid: "Grid (every 15&deg;)",
-    skyimage: "Milky Way image:",
+    skyview: "In the initial view the hole lies 30&deg; above the Galactic plane toward the Galactic " +
+      "rotation (l = 90&deg;); the Galactic center is 90&deg; to the right.",
+    mass: "Mass",
+    sun: "Sun",
+    massnote: "Only converts the times to seconds; the picture does not change.",
+    eternal: "Eternal black hole",
+    eternalnote: "An idealization that also shows the universe on the other side; a real hole formed by collapse = off.",
+    ships: "Other ships",
+    shipsnote: "One ship on a circular orbit at r = 8; each image carries its light delay, Doppler shift and the disk's shadow.",
+    dop: "Doppler effect",
+    dopnote: "(color + brightness g&#8308;)",
+    big: "Large text (for a projector)",
+    photoBtn: "Photo view (P)",
+    photonote: "Hides the panel and enlarges the instruments. P again also hides the instruments; Esc returns.",
+    dev: "Developer numbers (fps, f32 error, clock)",
+    kThrust: "thrust", kLook: "look around", kHide: "hide UI", kHelp: "how to fly",
+    hObs: "Observer",
+    devk: "Developer",
+    skyimage: "Milky Way:",
     comma: ", ",
-    skyview: "downscaled. In the initial view the BH lies 30&deg; above the Galactic plane " +
-      "toward the Galactic rotation (l = 90&deg;); the Galactic center is 90&deg; to the right.",
-    tau: "Proper time",
-    help: "Drag or arrow keys: look around / wheel: fov / free flight: W/S forward/back, " +
-      "A/D left/right (release to slow down) / proper time runs at the real rate for the chosen mass " +
-      "&times; the multiplier (default 1)",
+    downscaled: "downscaled",
+    helpTitle: "How to fly",
+    hThrust: "Thrust (forward, left, back, right). Release to return to rest (inside the horizon you coast).",
+    hLook: "Look around (or drag). The wheel sets the field of view.",
+    hModes: "Static · circular orbit.",
+    hHide: "Hide every UI element · photo view.",
+    hHelp: "This card · close it and return to the view.",
+    tDrag: "Drag", tLook: "Look around.",
+    tSheet: "The panel below", tSheetDo: "Choose the observer and the position R.",
+    tThrust: "Thrust", tThrustDo: "W/A/S/D on a keyboard (thrust on phones comes in the next version).",
+    hObserver: "The observer changes only when you choose one in the panel and when you fly, orbit or fall. " +
+      "The position slider moves the current observer; the static observer stops just above the horizon at " +
+      "R = 1.02 (go inside as the free-fall observer).",
+    helpOk: "Start",
     webgl2: "WebGL2 is required",
     error: "Error: ",
     binSize: (name, got, want) => `${name}.bin does not match meta.json in size ` +
@@ -153,30 +418,49 @@ const I18N = {
       "Run python3 export_table.py in renderer/web again",
     skyLoading: "loading…",
     skyFailed: "could not load the image",
-    rate1: (mass, unit) => `1 (real time for ${mass}, ${unit})`,
-    rateUp: (m, mass) => `${m} (${m}× real time for ${mass})`,
-    rateDown: (m, mass, inv) => `${m} (1/${inv} of real time for ${mass})`,
+    rateNote1: (mass, unit) => `real time for ${mass} (${unit})`,
+    rateNoteUp: (m, mass) => `${m}× real time for ${mass}`,
+    rateNoteDown: (mass, inv) => `1/${inv} of real time for ${mass}`,
     min: "min", hour: "h", day: "days",
     fall: "▶ Free fall", stop: "■ Stop",
-    fold: "Hide (H)", unfold: "Show (H)",
-    endDeep: "Flight ended at r = 0.001 rS (the end of the interior table)",
+    foldLabel: "Fold the panel", unfoldLabel: "Open the panel",
+    endDeep: "Flight ended at r = 0.001 rS (the end of the table)",
     endGamma: (r, g) => `r = ${r} rS: speed relative to the free-fall frame near c (γ > ${g}); flight ended at the display limit`,
     noFlyDeep: "Cannot fly from r = 0.001 rS (the end of the table)",
-    flyInside: "Near or inside the horizon: starting at rest in the free-fall frame (thrust changes E and L)",
+    flyInside: "Near or inside the horizon: flying from rest in the free-fall frame (thrust changes E and L)",
     flyHere: "Free flight from here (gravity-compensated hover)",
-    flyFromFall: "Free flight from here, starting at the free faller's velocity (release to settle to a hover)",
-    flyInsideStatic: "Just above the horizon: starting at the static observer's velocity (no hover here; thrust changes E and L)",
-    orbitMin: "C (stable circular orbit) works for R > 3 rS",
+    flyFromFall: "Free flight from here, from the free faller's velocity (release to settle to a hover)",
+    flyInsideStatic: "Just above the horizon: flying from the static observer's velocity (no hover here; thrust changes E and L)",
+    orbitMin: "Stable circular orbits need R > 3 rS",
     orbitOn: "On a circular orbit",
+    orbitToFly: "Free flight from the orbit's velocity",
     restInside: "At rest in t and φ (E = 0, L = 0) = the longest-lived fall inside",
     noHover: "Cannot hover just above the horizon (1 ≤ R < 1.02)",
     hovering: "Hovering (gravity-compensated)",
-    sliderStatic: "R < 1.02 rS: the slider shows the static camera (free flight ended)",
-    sliderMove: "Moved to the slider's R (gravity-compensated hover)",
-    flyPaused: "Free flight paused",
-    hudFlyIn: "Free flight (free-fall frame)",
-    hudFly: "Free flight",
     noStatic: "No static observer inside the horizon: free-fall view",
+    nameStatic: "Static observer", nameFall: "Free-fall observer (E = 1)",
+    nameOrbit: "Circular orbit (geodesic)", namePilot: "Pilot (thrust)",
+    floorStatic: "The static observer stops at R = 1.02 rS (it cannot stay at rest closer, and none exists inside the horizon). Go inside as the free-fall observer.",
+    floorOrbit: "Stable circular orbits exist only for R > 3 rS.",
+    toFall: "Switch to free fall", toStatic: "Switch to static",
+    obsToStatic: "Observer switched to static", obsToFall: "Observer switched to free fall",
+    noStaticHere: "No static observer below R = 1.02 rS (none exists inside the horizon)",
+    sliderToStatic: "Slider: the pilot is stopped in the static frame (static observer)",
+    sliderToFall: "Slider: the pilot is stopped in the free-fall frame (free-fall observer)",
+    descStatic: "Holds its place against gravity with a rocket (R ≥ 1.02).",
+    descFall: "Falls straight in from rest at infinity (E = 1). ▶ makes it fall.",
+    descOrbit: "Goes round a stable circular orbit (R > 3).",
+    descPilot: "Fly with W/A/S/D. Release to return to rest (inside the horizon you coast).",
+    offStatic: "Static needs R ≥ 1.02.", offOrbit: "Orbit needs R > 3.",
+    pilotTouch: "Thrust is W/A/S/D on a keyboard (thrust on phones comes in the next version)",
+    hudPos: "Position R", hudPosIn: "Position r", inside: "inside the horizon",
+    tauHor: "To the horizon", tauHorIf: "To the horizon if it fell",
+    tauSing: "To the singularity", tauSingCoast: "To the singularity, coasting",
+    betaStatic: "Speed (vs. static frame)", betaFall: "Speed (vs. free-fall frame)",
+    falling: "falling",
+    uiOffHint: "H brings the display back",
+    photoHint1: "Photo view: P also hides the instruments · Esc returns",
+    photoHint2: "Photo view (no instruments): P or Esc returns",
   },
 };
 const t = (key, ...args) => {
@@ -184,8 +468,11 @@ const t = (key, ...args) => {
   return typeof v === "function" ? v(...args) : v;
 };
 document.documentElement.lang = LANG;
-if (LANG === "en")
+if (LANG === "en") {
   for (const e of document.querySelectorAll("[data-t]")) e.innerHTML = I18N.en[e.dataset.t];
+  for (const e of document.querySelectorAll("[data-tl]")) e.setAttribute("aria-label", I18N.en[e.dataset.tl]);
+  for (const e of document.querySelectorAll("[data-tt]")) e.title = I18N.en[e.dataset.tt];
+}
 {
   const other = LANG === "en" ? "ja" : "en";
   const link = document.getElementById("lang");
@@ -193,15 +480,76 @@ if (LANG === "en")
   link.textContent = other === "en" ? "English" : "日本語";
 }
 document.getElementById("fall").textContent = t("fall");
-// The panel folds to its title line (button or H) to clear the view.
-function toggleFold(){
-  const folded = document.getElementById("panel").classList.toggle("folded");
-  document.getElementById("fold").textContent = t(folded ? "unfold" : "fold");
+
+// ---- the UI's own state (nothing here touches the camera).  The panel
+// folds to its title bar (the button by the title).  H hides every UI
+// element and brings them back; the panel is folded while hidden, so the
+// release check's "H folds the panel" holds.  P cycles the photo view: the
+// panel hidden and the HUD at print size, then no HUD, then back (Esc
+// returns).  "?" opens the card "how to fly"; it opens by itself on a first
+// visit (not under automation: navigator.webdriver) and not again once
+// closed.  That and the large text are remembered in localStorage, read
+// through try/catch (it may throw or be empty: private windows, previews).
+const $ = id => document.getElementById(id);
+const store = {
+  get(k){ try { return localStorage.getItem("bhviewer." + k); } catch (e) { return null; } },
+  set(k, v){ try { localStorage.setItem("bhviewer." + k, v); } catch (e) { /* not kept */ } },
+};
+function setFolded(folded){
+  $("panel").classList.toggle("folded", folded);
+  $("fold").setAttribute("aria-expanded", String(!folded));
+  $("fold").setAttribute("aria-label", t(folded ? "unfoldLabel" : "foldLabel"));
 }
-document.getElementById("fold").textContent = t("fold");
-document.getElementById("fold").addEventListener("click", () => {
-  toggleFold(); document.getElementById("gl").focus();
-});
+let hintTimer = 0;
+function flashHint(text){
+  const h = $("uihint");
+  h.textContent = text; h.hidden = false;
+  clearTimeout(hintTimer);
+  hintTimer = setTimeout(() => { h.hidden = true; }, 2500);
+}
+let uiOff = false, foldedBeforeOff = false;
+function toggleUI(){
+  uiOff = !uiOff;
+  if (uiOff) { foldedBeforeOff = $("panel").classList.contains("folded"); setFolded(true); }
+  else setFolded(foldedBeforeOff);
+  document.documentElement.classList.toggle("ui-off", uiOff);
+  if (uiOff) flashHint(t("uiOffHint")); else $("uihint").hidden = true;
+}
+let photo = 0;                       // 0 = off, 1 = no panel + large HUD, 2 = nothing
+function setPhoto(p){
+  photo = p;
+  const c = document.documentElement.classList;
+  c.toggle("photo", p > 0); c.toggle("nohud", p === 2);
+  if (p) flashHint(t(p === 1 ? "photoHint1" : "photoHint2")); else $("uihint").hidden = true;
+}
+function setBig(on){
+  document.documentElement.classList.toggle("big", on);
+  $("big").checked = on;
+  store.set("big", on ? "1" : "0");
+}
+function openHelp(){
+  const d = $("help");
+  if (d.open) return;
+  if (typeof d.showModal === "function") d.showModal(); else d.setAttribute("open", "");
+}
+$("help").addEventListener("close", () => { store.set("helpSeen", "1"); $("gl").focus(); });
+$("helpbtn").addEventListener("click", openHelp);
+$("fold").addEventListener("click", () => setFolded(!$("panel").classList.contains("folded")));
+$("photo").addEventListener("click", () => setPhoto(1));
+$("big").addEventListener("change", () => setBig($("big").checked));
+setFolded(false);
+setBig(store.get("big") === "1" || new URLSearchParams(location.search).get("big") === "1");
+if (store.get("helpSeen") !== "1" && !navigator.webdriver) openHelp();
+// the HUD's and the phone sheet's heights, for the elements placed around them
+if (typeof ResizeObserver === "function") {
+  const ro = new ResizeObserver(() => {
+    const s = document.documentElement.style;
+    s.setProperty("--hud-h", $("hud").offsetHeight + "px");
+    s.setProperty("--sheet-h", $("panel").offsetHeight + "px");
+    s.setProperty("--credit-h", $("skycredit").offsetHeight + "px");
+  });
+  ro.observe($("hud")); ro.observe($("panel")); ro.observe($("skycredit"));
+}
 
 const canvas = document.getElementById("gl");
 const gl = canvas.getContext("webgl2", { preserveDrawingBuffer: true });
@@ -1144,14 +1492,21 @@ async function main(){
   const MULT_DECADES = 4;
   const multOf = () => Math.pow(10, MULT_DECADES * (2 * parseFloat(el("spd").value) - 1));
   const rateOf = () => multOf() / RS_SEC[el("mass").value];      // r_S/c per wall second
+  // the time-rate control: "×m" and, under the slider, what it means
   function fmtRate(){
     const m = multOf(), sec = RS_SEC[el("mass").value];
     const mass = el("mass").options[el("mass").selectedIndex].text;
     const f = x => Number(x.toPrecision(2)).toString();
     const unit = sec >= 1 ? `1 rS/c = ${f(sec)} s` : `1 rS/c = ${f(sec * 1e6)} µs`;
-    return Math.abs(m - 1) < 0.02 ? t("rate1", mass, unit)
-      : m > 1 ? t("rateUp", f(m), mass)
-      : t("rateDown", f(m), mass, f(1 / m));
+    const one = Math.abs(m - 1) < 0.02;
+    return { value: "×" + (one ? "1" : f(m)),
+             note: one ? t("rateNote1", mass, unit)
+               : m > 1 ? t("rateNoteUp", f(m), mass) : t("rateNoteDown", mass, f(1 / m)) };
+  }
+  function showRate(){
+    const r = fmtRate();
+    if (el("spdval").textContent !== r.value) el("spdval").textContent = r.value;
+    if (el("spdnote").textContent !== r.note) el("spdnote").textContent = r.note;
   }
   const fmtSec = s => {
     const a = Math.abs(s);
@@ -1220,6 +1575,45 @@ async function main(){
     v: 0,
   };
   const keys = new Set();
+  // ---- the observer is an explicit state (DESIGN.md "R スライダの R = 1 の
+  // 跳び", 2026-10-29).  "freefall" = the radial free faller (E = 1, L = 0)
+  // at camera.R, moving only while the fall runs; "static" = the static
+  // observer at rest; "orbit" = the circular geodesic (C); "pilot" = free
+  // flight under thrust.  freefall and static are drawn at rest
+  // (camera.active false), orbit and pilot by the flight integrator
+  // (camera.active true).  Only the observer control, a flight, an orbit, a
+  // fall or 0 change it; the R slider moves the camera of the current mode
+  // and stops at that mode's floor.  No static observer exists at or inside
+  // the horizon and its view degenerates as R -> 1+ (the outside sky shrinks
+  // to a point at the zenith), so the static observer cannot cross R = 1
+  // continuously: until 2026-10-29 the slider handed the static camera to
+  // the free faller at R = 1 and the picture jumped (the two observers'
+  // relative speed tends to c there).
+  const R_STATIC_MIN = R_SWITCH;   // the psi table's last row, where a hover still exists
+  const R_ORBIT_MIN = 3.001;       // stable circular orbits: R > 3
+  let mode = "freefall";
+  // the observer control: one segment (a native radio) per mode
+  const MODE_INPUT = { static: "mStatic", freefall: "mFall", orbit: "mOrbit", pilot: "mPilot" };
+  function setMode(m, message){
+    mode = m;
+    for (const [k, id] of Object.entries(MODE_INPUT)) el(id).checked = k === m;
+    if (message !== undefined) camera.message = message;
+    showFloor(null);
+    uiTick = 0;                      // refresh the HUD and the hints at the next frame
+  }
+  // the line under the slider when it asked for an R below the current
+  // observer's floor, with the switch to an observer that goes further
+  let floorTo = null;
+  function showFloor(kind){
+    el("floor").hidden = !kind;
+    floorTo = kind === "static" ? "freefall" : kind === "orbit" ? "static" : null;
+    if (!kind) return;
+    el("floormsg").textContent = t(kind === "static" ? "floorStatic" : "floorOrbit");
+    el("floorgo").textContent = t(kind === "static" ? "toFall" : "toStatic");
+  }
+  const MODE_NAME = { static: "nameStatic", freefall: "nameFall", orbit: "nameOrbit", pilot: "namePilot" };
+  const DESC_KEYS = { static: "descStatic", freefall: "descFall", orbit: "descOrbit", pilot: "descPilot" };
+  let uiTick = 0;                    // the last HUD refresh (performance.now())
   // Verification knobs for the disk (no UI; __bh.set): diskAtabR = camera
   // radius from which the camera azimuth is read from the A tables instead of
   // the quadrature (Infinity = never, the default; values below 2.5 are raised
@@ -1253,7 +1647,7 @@ async function main(){
   setShips([{ id: "ship1", traj: { kind: "circular", r: 8, normal: [0, 0, 1], phase0: 1.0 } }]);
   function shipCamera(betaVec){
     const flyIn = camera.active && camera.interior;
-    const interior = camera.R <= 1.0 || flyIn || (!camera.active && el("ffo").checked && camera.R < meta.R_min);
+    const interior = camera.R <= 1.0 || flyIn || (!camera.active && mode === "freefall" && camera.R < meta.R_min);
     return { v: camera.v, R: camera.R, rhat: [...camera.rHat],
              frame: interior ? (flyIn ? "lemaitre" : "ffo") : "static",
              beta: (interior && !flyIn) ? [0, 0, 0] : [...betaVec] };
@@ -1456,9 +1850,8 @@ async function main(){
       // the interior table's last row: the flight ends where the fall does
       camera.R = Rmin; camera.rd = rdNext;
       camera.active = false; camera.interior = false; camera.timeDebt = 0;
-      keys.clear(); el("free").checked = false; el("ffo").checked = true;
+      keys.clear(); setMode("freefall", t("endDeep"));
       setSliderFromR(Rmin);
-      camera.message = t("endDeep");
       return false;
     }
     // Crossing R_SWITCH changes the reference frame (static <-> free fall).
@@ -1472,8 +1865,7 @@ async function main(){
       const bl = lemaitreBeta(), gam = 1 / Math.sqrt(1 - dot3(bl, bl));
       if (gam > LEM_GAMMA_MAX) {
         camera.active = false; camera.interior = false; camera.timeDebt = 0;
-        keys.clear(); el("free").checked = false; el("ffo").checked = true;
-        camera.message = t("endGamma", camera.R.toPrecision(2), LEM_GAMMA_MAX);
+        keys.clear(); setMode("freefall", t("endGamma", camera.R.toPrecision(2), LEM_GAMMA_MAX));
         return false;
       }
     }
@@ -1500,7 +1892,7 @@ async function main(){
   }
   function flightAcceleration(fwd, right){
     const direction = thrustDirection(fwd, right);
-    if (direction) camera.orbitLock = false;
+    if (direction && camera.orbitLock) { camera.orbitLock = false; setMode("pilot"); }
     if (camera.interior) {
       // No static observer to hold against and no hover to settle to inside:
       // pure thrust on a geodesic (W/S/A/D change E and L, interior_flight.py).
@@ -1563,8 +1955,7 @@ async function main(){
   function startFreeFlight(){
     const requestedR = camera.R;
     if (requestedR <= Rmin) {
-      camera.active = false; el("free").checked = false;
-      camera.message = t("noFlyDeep");
+      camera.active = false; setMode(mode, t("noFlyDeep"));
       return false;
     }
     // Do not teleport the pilot, in position or in velocity: the flight starts
@@ -1572,7 +1963,8 @@ async function main(){
     // frame shows the same view (the same boost) and the thrust then changes
     // it continuously.  The camera on the screen is the radial free faller
     // (E = 1, L = 0) when the FFO box is on (also during a fall) or inside
-    // the horizon, else the static observer; draw() makes the same choice.
+    // the horizon, else the static observer; draw() makes the same choice
+    // (since 2026-10-29 the box is the observer control's free-fall choice).
     // Until 2026-10-20 the flight started at rest in the static frame, so W
     // on the initial screen (R = 50, FFO on) dropped the faller's boost
     // sqrt(1/R) = 0.14 in one frame and the picture jumped (DESIGN.md
@@ -1582,7 +1974,7 @@ async function main(){
     // frame itself (beta = 0), and a static camera (1 < R < R_SWITCH, FFO
     // off) moves outward at sqrt(1/R) relative to it, which seedFlightLem
     // maps to the static E = sqrt(A), rd = 0.
-    const showsFaller = el("ffo").checked || requestedR <= 1.0;
+    const showsFaller = mode === "freefall" || requestedR <= 1.0;
     const vFall = Math.sqrt(1 / requestedR);
     falling = false; el("fall").textContent = t("fall");
     camera.R = requestedR;
@@ -1592,10 +1984,9 @@ async function main(){
     else seedFlight(camera.R, showsFaller ? scale(-vFall, camera.rHat) : [0, 0, 0]);
     camera.active = true; camera.lastNow = performance.now();
     camera.timeDebt = 0; camera.orbitLock = false;
-    camera.message = camera.interior
+    setMode("pilot", camera.interior
       ? t(showsFaller ? "flyInside" : "flyInsideStatic")
-      : t(showsFaller ? "flyFromFall" : "flyHere");
-    el("ffo").checked = false; el("free").checked = true;
+      : t(showsFaller ? "flyFromFall" : "flyHere"));
     return true;
   }
   function circularize(right){
@@ -1610,9 +2001,18 @@ async function main(){
     const beta = Math.sqrt(1 / (2 * camera.R * (1 - 1 / camera.R)));
     seedFlight(camera.R, scale(beta, tHat));
     camera.active = true; camera.lastNow = performance.now();
-    camera.timeDebt = 0; camera.orbitLock = true; camera.message = t("orbitOn");
+    camera.timeDebt = 0; camera.orbitLock = true;
     falling = false; el("fall").textContent = t("fall");   // an orbit ends a fall
-    el("ffo").checked = false; el("free").checked = true;
+    setMode("orbit", t("orbitOn"));
+  }
+  function orbitAt(R){
+    // the slider on an orbit: the circular geodesic at the new radius, in the
+    // same plane (hHat) and with the same sense
+    const tHat = unit(cross(camera.hHat, camera.rHat));
+    camera.interior = false;
+    seedFlight(R, scale(Math.sqrt(1 / (2 * (R - 1))), tHat));
+    camera.active = true; camera.orbitLock = true;
+    camera.timeDebt = 0; camera.lastNow = performance.now();
   }
   function hover(){
     const requestedR = camera.R;
@@ -1626,21 +2026,31 @@ async function main(){
         camera.interior = true; camera.active = true; camera.lastNow = performance.now();
         camera.timeDebt = 0; camera.orbitLock = false;
         seedFlightLem(requestedR, scale(Math.sqrt(requestedR), camera.rHat));
-        el("ffo").checked = false; el("free").checked = true;
-        camera.message = t("restInside");
+        setMode("pilot", t("restInside"));
         return true;
       }
       camera.message = t("noHover");
       return false;
     }
+    // the static observer, drawn at rest (the hover a released flight
+    // settles to; the same picture without the integrator)
     falling = false; keys.clear(); camera.R = requestedR;
-    camera.interior = false;
-    seedFlight(camera.R, [0, 0, 0]);
-    camera.active = true; camera.lastNow = performance.now();
-    camera.timeDebt = 0; camera.orbitLock = false;
-    camera.message = t("hovering");
-    el("fall").textContent = t("fall"); el("ffo").checked = false;
-    el("free").checked = true;
+    camera.active = false; camera.interior = false; camera.orbitLock = false;
+    el("fall").textContent = t("fall");
+    setMode("static", t("hovering"));
+    return true;
+  }
+  // the observer control (and the switch under the slider): an explicit
+  // change of observer at the camera's R; none of them moves the camera
+  function chooseObserver(m){
+    if (m === mode) return true;
+    if (m === "static" && camera.R < R_STATIC_MIN) {
+      setMode(mode, t("noStaticHere"));          // the control goes back
+      return false;
+    }
+    falling = false; el("fall").textContent = t("fall");
+    camera.active = false; camera.interior = false; camera.orbitLock = false; keys.clear();
+    setMode(m, t(m === "static" ? "obsToStatic" : "obsToFall"));
     return true;
   }
 
@@ -1649,12 +2059,12 @@ async function main(){
   let falling = false, fallR32 = 0, fallTau = 0, fallLast = 0, fallV0 = 0, fallR0 = 1;
   function startFall(){
     const R = camera.R;                        // fall from where the camera is
-    camera.active = false; camera.interior = false; el("free").checked = false;
+    camera.active = false; camera.interior = false; camera.orbitLock = false; keys.clear();
     fallR32 = Math.pow(R, 1.5);
     fallTau = 0; fallLast = performance.now();
     fallV0 = camera.v; fallR0 = R;             // v(r) is a closed form along the fall
     falling = true;
-    el("ffo").checked = true;                 // 落下中は FFO frame
+    setMode("freefall");                       // a fall is the free-fall observer
     el("fall").textContent = t("stop");
   }
   el("fall").addEventListener("click", () => {
@@ -1664,7 +2074,6 @@ async function main(){
   });
   function fallStep(){
     const spd = rateOf();
-    el("spdval").textContent = fmtRate();
     if (!falling) return;
     // proper time accumulates frame by frame at the current rate (a slider
     // change mid-fall is not a teleport; a tab pause adds at most 0.1 s of
@@ -1694,58 +2103,95 @@ async function main(){
     const now = performance.now();
     const dt = Math.min(Math.max((now - clockLast) / 1000, 0), 0.1) * rateOf();
     const R = camera.R;
-    camera.v += dt * ((R > 1 && !el("ffo").checked) ? BHShips.dvdtauRest(R) : BHShips.dvdtauFall(R));
+    camera.v += dt * ((R > 1 && mode !== "freefall") ? BHShips.dvdtauRest(R) : BHShips.dvdtauFall(R));
   }
 
   // The slider always moves the camera (user 2026-10-13: while flying or
   // falling it used to be a display the integrator overwrote every frame, so
-  // dragging it snapped back and looked broken).  In free flight the camera
-  // is re-seeded at rest at the new radius (below the flight limit the flight
-  // ends and the static camera takes over); during a fall the fall restarts
-  // from the new radius.
+  // dragging it snapped back and looked broken), and never changes the
+  // observer (2026-10-29, DESIGN.md "R スライダの R = 1 の跳び"): the free
+  // faller moves over the whole range through the horizon (a running fall
+  // restarts from the new R), the static observer stops at R_STATIC_MIN, an
+  // orbit moves to the circular geodesic at the new R and stops at
+  // R_ORBIT_MIN; at a floor the line under the slider offers the observer
+  // that goes further.  A pilot (free flight) is first stopped in its own
+  // reference frame: the static observer outside R_SWITCH, the free faller
+  // inside it (no hover there).  Until 2026-10-29 a flight was re-seeded as a
+  // hover, ended below R_SWITCH into the static camera, and that camera was
+  // replaced by the free faller at R = 1.
   el("R").addEventListener("input", () => {
     const R = sliderToR(parseFloat(el("R").value));
-    if (camera.active) {
-      keys.clear();
-      if (R < R_SWITCH) {
-        // no hover to re-seed there: the slider leaves the flight and shows
-        // the static camera (the free-fall view inside the horizon)
-        camera.active = false; camera.interior = false; el("free").checked = false;
-        camera.R = R;
-        camera.message = t("sliderStatic");
-      } else {
-        camera.interior = false;
-        seedFlight(R, [0, 0, 0]);
-        camera.orbitLock = false; camera.timeDebt = 0;
-        camera.lastNow = performance.now();
-        camera.message = t("sliderMove");
-      }
+    keys.clear();
+    let msg = "";
+    if (mode === "pilot") {
+      const inside = camera.interior;
+      camera.active = false; camera.interior = false; camera.orbitLock = false; camera.timeDebt = 0;
+      setMode(inside ? "freefall" : "static");
+      msg = t(inside ? "sliderToFall" : "sliderToStatic");
+    }
+    if (mode === "orbit") {
+      const Ro = Math.max(R, R_ORBIT_MIN);
+      orbitAt(Ro);
+      if (R < R_ORBIT_MIN) { setSliderFromR(Ro); showFloor("orbit"); } else showFloor(null);
       return;
     }
+    camera.message = msg;
+    if (mode === "static") {
+      const Rs = Math.max(R, R_STATIC_MIN);
+      camera.R = Rs;
+      if (R < R_STATIC_MIN) { setSliderFromR(Rs); showFloor("static"); } else showFloor(null);
+      return;
+    }
+    showFloor(null);
     if (falling) { fallR32 = Math.pow(R, 1.5); fallTau = 0; fallLast = performance.now(); fallV0 = camera.v; fallR0 = R; }
     camera.R = R;
-    camera.message = "";
   });
-  el("free").addEventListener("change", () => {
-    if (el("free").checked) startFreeFlight();
-    else {
-      camera.active = false; keys.clear(); el("ffo").checked = false;
-      camera.message = t("flyPaused");
-    }
-  });
-  el("orbit").addEventListener("click", () => circularize(viewBasis().right));
-  el("hover").addEventListener("click", hover);
+  // The observer control: choosing a segment is the explicit change of
+  // observer (static or free fall at the camera's R, an orbit at R, a
+  // flight that starts from the shown camera's four-velocity; from an orbit
+  // the flight keeps the orbit's velocity).  A refused choice puts the
+  // control back.
+  for (const [m, id] of Object.entries(MODE_INPUT))
+    el(id).addEventListener("change", () => {
+      if (!el(id).checked || m === mode) return;
+      let ok;
+      if (m === "orbit") { circularize(viewBasis().right); ok = mode === "orbit"; }
+      else if (m === "pilot") {
+        if (camera.active) { camera.orbitLock = false; setMode("pilot", t("orbitToFly")); ok = true; }
+        else ok = startFreeFlight();
+        if (ok && matchMedia("(hover: none) and (pointer: coarse)").matches) camera.message = t("pilotTouch");
+      }
+      else ok = chooseObserver(m);
+      if (!ok) setMode(mode);
+    });
+  el("floorgo").addEventListener("click", () => { if (floorTo) chooseObserver(floorTo); });
   const ARROW_KEYS = new Set(["arrowup", "arrowdown", "arrowleft", "arrowright"]);
   // A key tap can begin and end between animation frames.  Record it so that
   // such a tap always makes one small, deterministic turn rather than being
   // randomly ignored or turning by a frame-dependent amount.
   const arrowPresses = new Map();
+  // The keys act anywhere on the page, except that a focused form control
+  // keeps the keys it uses itself (arrows move a slider or the observer
+  // segments, a select takes its type-ahead), so the whole page works from
+  // the keyboard: Tab to a control, Esc back to the view (and out of the
+  // photo view or the hidden UI).  While the card "how to fly" is open it
+  // handles its own keys (Esc closes it).
   window.addEventListener("keydown", e => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if ($("help").open) return;
     const key = e.key.toLowerCase();
-    const controls = ["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", "0", "c", "h"];
-    if (!controls.includes(key) && /^(INPUT|SELECT|BUTTON)$/.test(e.target.tagName)) return;
-    if (key === "h") { e.preventDefault(); toggleFold(); return; }
+    if (key === "escape") {
+      if (photo) setPhoto(0);
+      else if (uiOff) toggleUI();
+      canvas.focus();
+      return;
+    }
+    const tag = e.target.tagName;
+    if (tag === "SELECT" || tag === "TEXTAREA") return;
+    if (ARROW_KEYS.has(key) && tag === "INPUT") return;
+    if (key === "h") { e.preventDefault(); toggleUI(); return; }
+    if (key === "p") { e.preventDefault(); setPhoto((photo + 1) % 3); return; }
+    if (key === "?") { e.preventDefault(); openHelp(); return; }
     if (key === "0") { e.preventDefault(); hover(); return; }
     if (key === "c") {
       e.preventDefault();
@@ -1798,6 +2244,7 @@ async function main(){
     px = e.clientX; py = e.clientY;
   });
   canvas.addEventListener("pointerup", () => dragging = false);
+  canvas.addEventListener("pointercancel", () => dragging = false);   // the browser took the touch
   canvas.addEventListener("wheel", e => {
     e.preventDefault();
     fov = Math.max(30, Math.min(150, fov + e.deltaY * 0.05));
@@ -1914,11 +2361,11 @@ async function main(){
     // check_probe.py check_disk recomputes each pixel with disk.py
     // reference_hits (no table).  engine / frame / beta say which shader
     // branch drew it and in which reference frame beta is meant.
-    probeDisk(o, n = 12, mode = 1, opts = {}){
+    probeDisk(o, n = 12, dmode = 1, opts = {}){
       const saved = this.state();
       this.set({ ...o, disk: true });
       gl.disable(gl.DITHER);
-      gl.uniform1i(U("uDiskProbe"), mode);
+      gl.uniform1i(U("uDiskProbe"), dmode);
       draw(true);
       const w = canvas.width, h = canvas.height;
       const buf = new Uint8Array(w * h * 4);
@@ -1949,9 +2396,9 @@ async function main(){
       const b = viewBasis();
       const flyIn = camera.active && camera.interior;
       const interior = camera.R <= 1.0 || flyIn
-        || (!camera.active && el("ffo").checked && camera.R < meta.R_min);
+        || (!camera.active && mode === "freefall" && camera.R < meta.R_min);
       const inc = parseFloat(el("inc").value) * Math.PI / 180;
-      const out = { kind: "disk", mode, w, h, R: camera.R,
+      const out = { kind: "disk", mode: dmode, w, h, R: camera.R,
                     aHat: scale(-1, camera.rHat),
                     engine: interior ? "interior" : "exterior",
                     frame: interior ? (flyIn ? "lemaitre" : "ffo") : "static",
@@ -2021,7 +2468,13 @@ async function main(){
       }
       if (o.R !== undefined) { camera.R = o.R; setSliderFromR(o.R); }
       if (o.rHat !== undefined) camera.rHat = unit(o.rHat);
-      if (o.ffo !== undefined) el("ffo").checked = o.ffo;
+      // the observer at rest (a machine pin: no floor, so a check can put the
+      // static camera anywhere outside the horizon); ignored during a flight,
+      // whose state() reads ffo false
+      if ((o.observer !== undefined || o.ffo !== undefined) && !camera.active) {
+        const m = o.observer ?? (o.ffo ? "freefall" : "static");
+        if (m === "freefall" || m === "static") setMode(m);
+      }
       if (o.dop !== undefined) el("dop").checked = o.dop;
       if (o.eternal !== undefined) el("eternal").checked = o.eternal;
       if (o.disk !== undefined) el("disk").checked = o.disk;
@@ -2041,7 +2494,7 @@ async function main(){
                       hHat: [...camera.hHat], E: camera.E, L: camera.L, rd: camera.rd,
                       active: camera.active, interior: camera.interior,
                       yaw, pitch,
-                      fov: el("fov").value, ffo: el("ffo").checked,
+                      fov: el("fov").value, ffo: mode === "freefall", observer: mode,
                       dop: el("dop").checked, eternal: el("eternal").checked,
                       disk: el("disk").checked, inc: el("inc").value,
                       diskAtabR: diskKnobs.diskAtabR, diskRmin: diskKnobs.diskRmin,
@@ -2091,9 +2544,85 @@ async function main(){
     },
   };
 
+  // ---- the panel's live values and the HUD's cards, about 10 times a second
+  // (a number that changes every frame cannot be read anyway; the DOM is
+  // touched only where a value changed).  The HUD names the observer and
+  // gives R, the proper time to the horizon or to the singularity (with the
+  // seconds for the chosen mass), the speed and, in flight, E and L.
+  const setText = (id, s) => { const e = el(id); if (e.textContent !== s) e.textContent = s; };
+  const setHidden = (id, h) => { const e = el(id); if (e.hidden !== h) e.hidden = h; };
+  const fmtR = R => R < 0.1 ? R.toPrecision(2) : R < 1e4 ? R.toFixed(2) : R.toExponential(3);
+  const fmtTau = x => x < 0.1 ? x.toPrecision(2) : x < 1e4 ? x.toFixed(2) : x.toExponential(3);
+  const TAU_KEYS = { horizon: "tauHor", horizonIf: "tauHorIf", sing: "tauSing", singCoast: "tauSingCoast" };
+  let msgSet = "", msgAt = 0;
+  function refreshUI(R, betaVec){
+    const now = performance.now();
+    showRate();
+    setText("Rval", fmtR(R));
+    setText("fovval", fov.toFixed(0));
+    setText("incval", el("inc").value);
+    setHidden("incrow", !el("disk").checked);
+    setText("fall", t(falling ? "stop" : "fall"));
+    // the observer control: what can be chosen here, and what the choice is
+    const offS = mode !== "static" && R < R_STATIC_MIN, offO = mode !== "orbit" && R <= 3.0;
+    if (el("mStatic").disabled !== offS) el("mStatic").disabled = offS;
+    if (el("mOrbit").disabled !== offO) el("mOrbit").disabled = offO;
+    const offP = mode !== "pilot" && R <= Rmin;
+    if (el("mPilot").disabled !== offP) el("mPilot").disabled = offP;
+    setText("modehint", t(DESC_KEYS[mode]) + (offS ? " " + t("offStatic") : "")
+      + (offO ? " " + t("offOrbit") : ""));
+    // the HUD
+    const inside = R < 1.0, rsSec = RS_SEC[el("mass").value];
+    setText("hObs", t(MODE_NAME[mode]) + (falling ? " · " + t("falling") : "")
+      + ((!camera.active && mode !== "freefall" && R <= 1.0) ? " · " + t("noStatic") : ""));
+    setText("hRk", t(inside ? "hudPosIn" : "hudPos"));
+    setText("hR", fmtR(R));
+    setHidden("hIn", !inside);
+    if (inside) setText("hIn", t("inside"));
+    // proper time: outside, to the horizon on the E = 1 fall from here (the
+    // free faller's own; "if it fell" for the others); inside, to the
+    // singularity (the free faller's, or a pilot's coasting on its E and L)
+    let tauK = null, tau = 0;
+    if (inside) {
+      if (camera.active) { tauK = TAU_KEYS.singCoast; tau = tauToSingularity(R, camera.E, camera.L); }
+      else { tauK = TAU_KEYS.sing; tau = 2 / 3 * Math.pow(R, 1.5); }
+    } else if (R > 1.0) {
+      tauK = mode === "freefall" ? TAU_KEYS.horizon : TAU_KEYS.horizonIf;
+      tau = 2 / 3 * (Math.pow(R, 1.5) - 1);
+    }
+    setHidden("cTau", tauK === null);
+    if (tauK) {
+      setText("hTauK", t(tauK)); setText("hTau", fmtTau(tau) + " rS/c"); setText("hTauS", fmtSec(tau * rsSec));
+    }
+    // speed: against the static frame outside, against the free-fall frame
+    // for a pilot below R_SWITCH; inside, the free faller has no static frame
+    const noBeta = !camera.active && inside;
+    setHidden("cBeta", noBeta);
+    if (!noBeta) {
+      setText("hBetaK", t(camera.active && camera.interior ? "betaFall" : "betaStatic"));
+      const b = norm(betaVec);
+      setText("hBeta", b.toFixed(3) + " c");
+      setText("hGam", b > 0.866 ? "γ = " + (1 / Math.sqrt(Math.max(1 - b * b, 1e-12))).toFixed(2) : "");   // γ >= 2
+    }
+    setHidden("cE", !camera.active); setHidden("cL", !camera.active);
+    if (camera.active) { setText("hE", camera.E.toFixed(4)); setText("hL", camera.L.toFixed(4)); }
+    const dev = el("dev").checked;
+    setHidden("cDev", !dev);
+    if (dev) setText("hDev", `fps ${fps.toFixed(0)} · f32 lookup ${meta.f32_bilinear_vs_exact_rad.toExponential(1)} rad`
+      + ` · v ${camera.v.toFixed(1)} rS/c`);
+    // the camera's message, for 6 s after it changed
+    if (camera.message !== msgSet) { msgSet = camera.message; msgAt = now; }
+    setText("msg", (msgSet && now - msgAt < 6000) ? msgSet : "");
+  }
+
   function draw(once){
-    const w = canvas.clientWidth * devicePixelRatio;
-    const h = canvas.clientHeight * devicePixelRatio;
+    // whole device pixels: a fractional size (125 % or 150 % scaling) never equals
+    // canvas.width, which would reallocate the drawing buffer every frame
+    // (at most 2 device pixels per CSS pixel: a phone at 3 would draw 2.25x
+    // the pixels for no visible gain)
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    const w = Math.round(canvas.clientWidth * dpr);
+    const h = Math.round(canvas.clientHeight * dpr);
     if (canvas.width !== w || canvas.height !== h) {
       canvas.width = w; canvas.height = h;
       gl.viewport(0, 0, w, h);
@@ -2109,14 +2638,10 @@ async function main(){
       clockLast = performance.now();
     }
     const R = camera.R;
-    el("spdval").textContent = fmtRate();
-    el("Rval").textContent = R < 0.1 ? R.toPrecision(2)
-      : R < 1e4 ? R.toFixed(2) : R.toExponential(3);
-    el("fovval").textContent = fov.toFixed(0);
 
     const aHat = scale(-1, camera.rHat);
     const betaVec = camera.active ? (camera.interior ? lemaitreBeta() : flightBeta())
-      : ((el("ffo").checked && R > 1.0) ? scale(Math.sqrt(1 / R), aHat) : [0, 0, 0]);
+      : ((mode === "freefall" && R > 1.0) ? scale(Math.sqrt(1 / R), aHat) : [0, 0, 0]);
     lastBeta = betaVec;
 
     gl.uniform1f(U("uR"), R);
@@ -2127,7 +2652,7 @@ async function main(){
     gl.uniform3fv(U("uUp"), basis.up);
     gl.uniform3fv(U("uBhat"), aHat);
     gl.uniform3fv(U("uBeta"), betaVec);
-    gl.uniform1i(U("uFFO"), (!camera.active && el("ffo").checked) ? 1 : 0);
+    gl.uniform1i(U("uFFO"), (!camera.active && mode === "freefall") ? 1 : 0);
     gl.uniform1i(U("uFlying"), camera.active ? 1 : 0);
     gl.uniform1i(U("uFlyIn"), (camera.active && camera.interior) ? 1 : 0);
     gl.uniform1i(U("uDop"), el("dop").checked ? 1 : 0);
@@ -2136,7 +2661,6 @@ async function main(){
     gl.uniform1i(U("uSkyImage"),
                  (el("sky").value === "milkyway" && skyState === "ready") ? 1 : 0);
     const inc = parseFloat(el("inc").value) * Math.PI / 180;
-    el("incval").textContent = el("inc").value;
     gl.uniform3fv(U("uZd"), [0, Math.sin(inc), Math.cos(inc)]);
     gl.uniform1f(U("uDiskAtabR"), Number.isFinite(diskKnobs.diskAtabR)
       ? Math.max(diskKnobs.diskAtabR, 2.5) : 1e30);
@@ -2148,39 +2672,13 @@ async function main(){
     frames++;
     const now = performance.now();
     if (now - t0 > 500) { fps = frames * 1000 / (now - t0); frames = 0; t0 = now; }
-    const rsSec = RS_SEC[el("mass").value];
-    const tauIn = 2 / 3 * Math.pow(R, 1.5);
-    const tauHor = 2 / 3 * (Math.pow(R, 1.5) - 1);
-    const betaMag = norm(betaVec);
-    const tauFly = (camera.active && R < 1.0) ? tauToSingularity(R, camera.E, camera.L) : 0;
-    const hudPre = camera.active
-      ? (camera.interior
-          ? `${t("hudFlyIn")}   r = ${el("Rval").textContent} rS` +
-            `${R < 1.0 ? "   ⚫ inside the horizon" : ""}   |beta| = ${betaMag.toFixed(3)}   ` +
-            `E = ${camera.E.toFixed(4)}   L = ${camera.L.toFixed(4)}   ` +
-            (R < 1.0 ? `tau to singularity = ${tauFly < 0.1 ? tauFly.toPrecision(2) : tauFly.toFixed(2)} rS/c (${fmtSec(tauFly * rsSec)})   ` : "")
-          : `${t("hudFly")}   R = ${el("Rval").textContent} rS   |beta| = ${betaMag.toFixed(3)}   ` +
-            `E = ${camera.E.toFixed(4)}   L = ${camera.L.toFixed(4)}   `)
-      : R < 1.0
-      ? `r = ${R < 0.1 ? R.toPrecision(2) : R.toFixed(3)} rS   ⚫ inside the horizon   ` +
-        `tau to singularity = ${tauIn < 0.1 ? tauIn.toPrecision(2) : tauIn.toFixed(2)} rS/c (${fmtSec(tauIn * rsSec)})   `
-      : `R = ${el("Rval").textContent} rS   beta = ` +
-        `${betaMag.toFixed(3)}   ` +
-        `tau to horizon = ${tauHor.toFixed(2)} rS/c (${fmtSec(tauHor * rsSec)})   `;
-    // no static observer inside the horizon: the shader shows the FFO view
-    const frameNote = (!camera.active && !el("ffo").checked && R <= 1.0)
-      ? t("noStatic") + "   " : "";
-    document.getElementById("hud").textContent = hudPre + frameNote +
-      (camera.message ? camera.message + "   " : "") +
-      `v = ${camera.v.toFixed(1)} rS/c   ` +
-      `fps = ${fps.toFixed(0)}   ` +
-      `f32 lookup err ~ ${meta.f32_bilinear_vs_exact_rad.toExponential(1)} rad`;
+    if (now - uiTick > 100) { uiTick = now; refreshUI(R, betaVec); }
     if (once !== true) requestAnimationFrame(draw);
   }
   requestAnimationFrame(draw);
 }
 main().catch(e => {
-  document.getElementById("hud").textContent = t("error") + e.message;
+  document.getElementById("msg").textContent = t("error") + e.message;
   console.error(e);
 });
 </script>
