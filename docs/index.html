@@ -7,15 +7,20 @@
 <meta name="theme-color" content="#000000">
 <title>Schwarzschild real-time viewer</title>
 <style>
-  /* The UI (DESIGN.md "UI の作り直し", 2026-10-29): one dark translucent
-     panel over the picture.  What one chooses most (observer, position R,
-     fall, time rate, disk) is in front; the rest is one step behind ("表示と
-     設定"); developer numbers are off by default.  The mutually exclusive
-     observers are one segmented control; the HUD is labelled number cards.
+  /* The UI (DESIGN.md "UI の作り直し", 2026-10-29, and "UI の見直し: 時間を
+     1 つの状態に", 2026-11-04): one dark translucent panel over the picture.
+     Its title bar holds the time toggle (pause / resume, the same for every
+     observer; it stays when the panel is folded), the help and the fold.  In
+     front: the observer (one segmented control), the position R, the time
+     rate and what is in space (disk, other ship); the rest is one step behind
+     ("表示と設定"); developer numbers are off by default.  The HUD is
+     labelled number cards; the other ship carries a name tag on the picture.
      Every text colour keeps WCAG AA (>= 4.5:1) even over a white sky behind
-     the 86 % panel (the table in DESIGN.md).  No web fonts, no backdrop blur
-     (the canvas redraws every frame behind it).  Phones: the panel is a sheet
-     at the bottom, the HUD sits at the top, targets are 44 px. */
+     the 86 % panel (check_contrast.py).  No web fonts, no backdrop blur (the
+     canvas redraws every frame behind it).  Phones and upright tablets: the
+     panel is a sheet at the bottom and the HUD sits at the top; phones on
+     their side: the panel is a sheet on the left and the HUD at the top
+     right; targets are 44 px. */
   :root {
     --fs: 15px;
     --panel: rgba(13, 17, 26, .86);
@@ -30,6 +35,8 @@
     --warn: #ffd27a;
     --kbd: #1e2535;
     --kbd-line: #56617a;
+    --tag: #ffd9a0;              /* the other ship's tag: the ship's warm colour */
+    --tag-line: rgba(255, 217, 160, .55);
     --ctl: 2.25rem;              /* height of a control */
     --edge: 12px;
     --hud-h: 0px;                /* set by the page (ResizeObserver) */
@@ -58,6 +65,14 @@
   button.icon { min-width: var(--ctl); padding: 0 .45rem; font-weight: 700; }
   #fold::before { content: "▴"; }                        /* the panel folds up to its title bar */
   #fold[aria-expanded="false"]::before { content: "▾"; }
+  /* the time toggle, drawn in CSS (the emoji fonts would draw U+23F8 in
+     colour): two bars while time runs (pressing pauses), a triangle while
+     it is paused (pressing resumes) */
+  #play { display: inline-flex; align-items: center; justify-content: center; }
+  #play::before { content: ""; width: .7rem; height: .8rem;
+                  background: linear-gradient(90deg, currentColor 0 34%, transparent 34% 66%, currentColor 66% 100%); }
+  #play.paused { background: var(--accent-bg); border-color: transparent; }
+  #play.paused::before { background: currentColor; clip-path: polygon(14% 0, 100% 50%, 14% 100%); }
   input[type=range] { display: block; width: 100%; height: var(--ctl); margin: 0; accent-color: var(--accent); cursor: pointer; }
   input[type=checkbox] { width: 1.15rem; height: 1.15rem; margin: 0; flex: none; accent-color: var(--accent); }
   kbd { display: inline-block; min-width: 1.6em; padding: 0 .35em; border: 1px solid var(--kbd-line);
@@ -71,9 +86,10 @@
            max-height: calc(100vh - 3 * var(--edge) - var(--hud-h)); overflow: auto; overscroll-behavior: contain;
            background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
            box-shadow: 0 10px 30px rgba(0, 0, 0, .45); user-select: none; -webkit-user-select: none; }
-  .ph { display: flex; align-items: center; gap: .35rem; padding: .45rem .45rem .45rem .9rem; }
-  .ph h1 { flex: 1; margin: 0; font-size: 1rem; font-weight: 700; white-space: nowrap; }
-  #lang { display: inline-flex; align-items: center; min-height: var(--ctl); padding: 0 .45rem; font-size: .85rem; }
+  .ph { display: flex; align-items: center; gap: .35rem; padding: .45rem; }
+  .ph h1 { flex: 1; min-width: 0; margin: 0 0 0 .2rem; font-size: 1rem; font-weight: 700; white-space: nowrap;
+           overflow: hidden; text-overflow: ellipsis; }
+  #lang { display: inline-flex; align-items: center; min-height: var(--ctl); padding: 0 .2rem; font-size: .85rem; }
   #panelbody { display: grid; gap: 1rem; padding: .2rem .9rem .9rem; }
   #panel.folded #panelbody { display: none; }
   fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
@@ -102,8 +118,11 @@
   .floor { margin-top: .45rem; padding: .5rem .65rem; border-left: 3px solid var(--warn); border-radius: 6px;
            background: rgba(255, 210, 122, .1); font-size: .85rem; }
   .floor button { margin-top: .45rem; }
-  .act { display: grid; grid-template-columns: auto 1fr; gap: .8rem; align-items: center; }
   .check { display: flex; align-items: center; gap: .55rem; min-height: var(--ctl); cursor: pointer; }
+  /* what is in space: the disk and the other ship side by side */
+  .scene { display: flex; flex-wrap: wrap; gap: 0 1.4rem; }
+  .off { margin: .2rem 0 0; font-size: .8rem; color: var(--text2); }
+  .off::before { content: "— "; color: var(--muted); }
   details > summary { display: flex; align-items: center; gap: .45rem; min-height: var(--ctl); cursor: pointer;
                       list-style: none; font-weight: 600; color: var(--text2); }
   details > summary::-webkit-details-marker { display: none; }
@@ -111,8 +130,12 @@
   details[open] > summary::before { content: "▾"; }
   .set { display: grid; gap: .75rem; padding-top: .35rem; }
   .set select { width: 100%; }
-  .keys { display: flex; flex-wrap: wrap; gap: 0 .9rem; margin: 0; font-size: .8rem; line-height: 2.1; color: var(--text2); }
+  /* the panel's foot: the key hints (keyboards only) and, at the end of the
+     last line, the link to the other language */
+  .keys { display: flex; flex-wrap: wrap; align-items: center; gap: 0 .9rem; margin: 0; font-size: .8rem; line-height: 2.1;
+          color: var(--text2); }
   .keys > span { white-space: nowrap; }
+  .keys #lang { margin-left: auto; }
 
   /* ---- the HUD: labelled number cards */
   #hud { position: fixed; left: max(var(--edge), env(safe-area-inset-left)); bottom: max(var(--edge), env(safe-area-inset-bottom));
@@ -126,6 +149,15 @@
   .card.dev .v { font-size: .8em; font-weight: 400; }
   .badge { display: inline-block; margin-left: .35em; padding: 0 .4em; border-radius: 4px; background: #6b1e2c;
            color: #ffe1e6; font-size: .65em; font-weight: 700; vertical-align: .15em; }
+  .badge.time { background: #1d3f7a; color: #e3ecff; }
+  /* the other ship's name tag: placed every frame at its image on the screen
+     (under the panel in the stacking order, not drawn into the canvas) */
+  #shiptag { position: fixed; left: 0; top: 0; pointer-events: none; will-change: transform; }
+  #shiptag::before { content: ""; position: absolute; left: 3px; bottom: 3px; width: 11px; height: 1px;
+                     background: var(--tag); transform: rotate(-45deg); transform-origin: left center; }
+  #shiptag span { position: absolute; left: 11px; bottom: 9px; padding: .05rem .4rem; border-radius: 5px;
+                  background: rgba(13, 17, 26, .86); border: 1px solid var(--tag-line); color: var(--tag);
+                  font-size: .75rem; font-weight: 600; white-space: nowrap; }
   #msg { position: fixed; top: max(var(--edge), env(safe-area-inset-top)); right: max(var(--edge), env(safe-area-inset-right));
          max-width: min(26rem, calc(100vw - 22rem - 3 * var(--edge))); padding: .55rem .85rem;
          background: rgba(13, 17, 26, .92); border: 1px solid var(--line); border-left: 3px solid var(--accent);
@@ -134,10 +166,24 @@
   #skycredit { position: fixed; right: max(var(--edge), env(safe-area-inset-right)); bottom: max(var(--edge), env(safe-area-inset-bottom));
                max-width: min(24rem, 40vw); margin: 0; padding: .3rem .6rem; background: var(--panel);
                border: 1px solid var(--line); border-radius: 8px; font-size: .72rem; color: var(--text2); text-align: right; }
-  #uihint { position: fixed; left: 50%; bottom: 1.5rem; transform: translateX(-50%); padding: .35rem .8rem;
+  /* the hint of H and P: at the top centre, clear of the (enlarged) HUD */
+  #uihint { position: fixed; left: 50%; top: max(var(--edge), env(safe-area-inset-top)); transform: translateX(-50%);
+            max-width: calc(100vw - 2 * var(--edge)); box-sizing: border-box; padding: .35rem .8rem;
             background: rgba(13, 17, 26, .92); border: 1px solid var(--line); border-radius: 999px;
             font-size: .85rem; pointer-events: none; }
-  /* ---- the first-visit card "how to fly" */
+  /* ---- the first-visit note: small, not modal, above the HUD in the middle
+     of the room right of the panel (on phones above the sheet); closed
+     once, it does not come back */
+  #coach { position: fixed; left: calc((100vw + 22rem + var(--edge)) / 2);
+           bottom: calc(max(var(--edge), env(safe-area-inset-bottom)) + var(--hud-h) + 10px);
+           transform: translateX(-50%); width: max-content;
+           max-width: min(30rem, calc(100vw - 22rem - 3 * var(--edge)));
+           box-sizing: border-box; padding: .7rem .9rem .75rem; background: var(--solid); border: 1px solid var(--line);
+           border-left: 3px solid var(--accent); border-radius: 12px; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); }
+  #coach .ct { margin: 0 0 .35rem; font-weight: 700; }
+  #coach ul { margin: 0; padding-left: 1.1rem; font-size: .9rem; line-height: 1.9; color: var(--text2); }
+  #coach .cb { display: flex; justify-content: flex-end; gap: .5rem; margin-top: .55rem; }
+  /* ---- the card "how to fly" (?) */
   #help { width: min(34rem, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); box-sizing: border-box;
           padding: 1.1rem 1.3rem 1.2rem; color: var(--text); background: var(--solid);
           border: 1px solid var(--line); border-radius: 16px; }
@@ -151,17 +197,23 @@
   @media (hover: none) and (pointer: coarse) {
     .kbd-only { display: none; }
     dl.touch-only { display: grid; }
+    ul.touch-only { display: block; }
   }
-  /* ---- H: no UI at all; P: the photo view (a larger HUD, then none) */
-  html.ui-off #panel, html.ui-off #hud, html.ui-off #msg, html.ui-off #skycredit { display: none; }
-  html.photo #panel, html.photo #msg, html.photo #skycredit, html.photo .card.dev { display: none; }
+  /* ---- H: no UI at all; P: the photo view (a larger HUD, then none; no
+     tag, no time badge, nothing but the instruments in the picture) */
+  html.ui-off #panel, html.ui-off #hud, html.ui-off #msg, html.ui-off #skycredit,
+  html.ui-off #shiptag, html.ui-off #coach { display: none; }
+  html.photo #panel, html.photo #msg, html.photo #skycredit, html.photo .card.dev,
+  html.photo #shiptag, html.photo #coach, html.photo .badge.time { display: none; }
   html.photo #hud { font-size: 1.5rem; max-width: calc(100vw - 2 * var(--edge)); }
   html.photo .card { background: rgba(0, 0, 0, .8); }
   html.photo.nohud #hud { display: none; }
-  /* ---- phones: the panel is a sheet at the bottom, the HUD at the top */
-  @media (max-width: 640px) {
+  /* ---- phones (and upright tablets, where the desktop panel would reach the
+     hole at the centre): the panel is a sheet at the bottom, the HUD at the
+     top */
+  @media (max-width: 640px), (orientation: portrait) and (max-width: 900px) and (pointer: coarse) {
     #panel { top: auto; left: 0; right: 0; bottom: 0; width: auto; max-width: none;
-             max-height: 40vh; max-height: 40dvh; border-radius: 16px 16px 0 0; border-bottom: 0;
+             max-height: 40vh; max-height: min(40dvh, 22rem); border-radius: 16px 16px 0 0; border-bottom: 0;
              padding: 0 env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
     #hud { top: max(8px, env(safe-area-inset-top)); bottom: auto; left: max(8px, env(safe-area-inset-left));
            right: max(8px, env(safe-area-inset-right)); max-width: none; gap: .3rem; }
@@ -173,9 +225,34 @@
                  max-width: calc(100vw - 16px); font-size: .68rem; }
     #msg { top: calc(max(8px, env(safe-area-inset-top)) + var(--hud-h) + var(--credit-h) + 12px);
            left: 8px; right: 8px; max-width: none; }
-    #uihint { bottom: calc(var(--sheet-h) + 3rem); }
+    #uihint { top: calc(max(8px, env(safe-area-inset-top)) + var(--hud-h) + 8px); }
+    #coach { left: 50%; bottom: calc(var(--sheet-h) + 10px); max-width: calc(100vw - 16px); }
     #fold::before { content: "▾"; }                      /* the sheet folds down */
     #fold[aria-expanded="false"]::before { content: "▴"; }
+  }
+  /* ---- a short landscape screen (phones on their side): the panel is a
+     sheet down the left edge, the HUD and the messages at the top right,
+     the credit at the bottom right; the hole (the centre) stays clear */
+  @media (max-height: 500px) and (orientation: landscape) {
+    #panel { top: max(8px, env(safe-area-inset-top)); bottom: max(8px, env(safe-area-inset-bottom));
+             left: max(8px, env(safe-area-inset-left)); right: auto; width: 19rem; max-width: calc(50vw - 16px);
+             max-height: none; border-radius: 14px; border-bottom: 1px solid var(--line); padding: 0; }
+    #panel.folded { bottom: auto; }
+    #hud { top: max(8px, env(safe-area-inset-top)); bottom: auto; left: auto; right: max(8px, env(safe-area-inset-right));
+           max-width: calc(100vw - 19rem - 32px); justify-content: flex-end; gap: .3rem; }
+    .card { padding: .2em .5em .3em; }
+    .card .v { font-size: .98em; }
+    #skycredit { top: auto; bottom: max(8px, env(safe-area-inset-bottom)); right: max(8px, env(safe-area-inset-right));
+                 left: auto; max-width: calc(100vw - 19rem - 32px); font-size: .66rem; }
+    /* the message above the credit: under the HUD it would sit on the hole */
+    #msg { top: auto; bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--credit-h) + 8px); left: auto;
+           right: max(8px, env(safe-area-inset-right)); max-width: calc(100vw - 19rem - 32px); }
+    #uihint { top: calc(max(8px, env(safe-area-inset-top)) + var(--hud-h) + 8px); }
+    #coach { left: auto; right: max(8px, env(safe-area-inset-right)); transform: none;
+             bottom: calc(max(8px, env(safe-area-inset-bottom)) + var(--credit-h) + 8px);
+             max-width: calc(100vw - 19rem - 32px); }
+    #fold::before { content: "▴"; }
+    #fold[aria-expanded="false"]::before { content: "▾"; }
   }
   @media (prefers-reduced-motion: no-preference) {
     #panel, #msg { transition: opacity .15s ease; }
@@ -184,10 +261,11 @@
 </head>
 <body>
 <canvas id="gl" tabindex="0" aria-label="ブラックホールの視界。ドラッグか矢印キーで見回す" data-tl="canvasLabel"></canvas>
+<div id="shiptag" aria-hidden="true" hidden><span data-t="shipTag">他機 · r = 8 の円軌道</span></div>
 <aside id="panel" aria-label="操作パネル" data-tl="panelLabel">
   <div class="ph">
+    <button id="play" class="icon" aria-label="時間を止める (Space)" title="時間を止める (Space)"></button>
     <h1>Schwarzschild viewer</h1>
-    <a id="lang" href="?lang=en">English</a>
     <button id="helpbtn" class="icon" aria-label="飛び方 (?)" data-tl="helpLabel" aria-haspopup="dialog">?</button>
     <button id="fold" class="icon" aria-expanded="true" aria-controls="panelbody" aria-label="パネルを畳む" data-tl="foldLabel"></button>
   </div>
@@ -201,6 +279,7 @@
         <input type="radio" name="mode" id="mPilot" value="pilot"><label for="mPilot" data-t="mPilot">自由飛行</label>
       </div>
       <p id="modehint" class="hint"></p>
+      <p id="modeoff" class="off" hidden></p>
     </fieldset>
     <div>
       <div class="row"><label class="lbl" for="R" data-t="pos">位置 R</label>
@@ -209,21 +288,23 @@
       <div class="scale" aria-hidden="true"><span>0.001</span><span class="s1" data-t="horizonTick">1 = 地平面</span><span class="s2">100</span></div>
       <div id="floor" class="floor" role="status" hidden><span id="floormsg"></span><br><button id="floorgo"></button></div>
     </div>
-    <div class="act">
-      <button id="fall" class="primary">▶ 自由落下</button>
-      <div>
-        <div class="row"><label class="lbl" for="spd" data-t="rate">時間の速さ</label> <output id="spdval" for="spd"></output></div>
-        <input id="spd" type="range" min="0" max="1" step="any" value="0.5" aria-describedby="spdnote">
-        <div id="spdnote" class="hint"></div>
-      </div>
-    </div>
     <div>
-      <label class="check"><input id="disk" type="checkbox"> <span data-t="disk">降着円盤</span></label>
+      <div class="row"><label class="lbl" for="spd" data-t="rate">時間の速さ</label> <output id="spdval" for="spd"></output></div>
+      <!-- 25 notches of 1, 2, 5 x 10^k from x1e-4 to x1e4 (x1 in the middle) -->
+      <input id="spd" type="range" min="0" max="1" step="0.041666666666666664" value="0.5" aria-describedby="spdnote">
+      <div id="spdnote" class="hint"></div>
+    </div>
+    <fieldset>
+      <legend data-t="scene">空間にあるもの</legend>
+      <div class="scene">
+        <label class="check"><input id="disk" type="checkbox"> <span data-t="disk">降着円盤</span></label>
+        <label class="check"><input id="ships" type="checkbox" checked> <span data-t="ships">他機</span></label>
+      </div>
       <div id="incrow" hidden>
         <div class="row"><label class="lbl" for="inc" data-t="inc">円盤の傾き</label> <output id="incval" for="inc"></output>&deg;</div>
         <input id="inc" type="range" min="0" max="89" step="1" value="80">
       </div>
-    </div>
+    </fieldset>
     <details id="more">
       <summary data-t="more">表示と設定</summary>
       <div class="set">
@@ -244,24 +325,24 @@
           <p class="hint" data-t="massnote">時間を秒に換算するためだけ。絵は変わらない。</p></div>
         <div><label class="check"><input id="eternal" type="checkbox"> <span data-t="eternal">永久ブラックホール</span></label>
           <p class="hint" data-t="eternalnote">向こう側の宇宙まで見える理想化。崩壊でできた現実の穴は OFF。</p></div>
-        <div><label class="check"><input id="ships" type="checkbox" checked> <span data-t="ships">他機</span></label>
-          <p class="hint" data-t="shipsnote">r = 8 の円軌道を回る 1 機。像ごとに光の遅れ・ドップラー・円盤の陰がつく。</p></div>
         <label class="check" hidden><input id="dop" type="checkbox"> <span data-t="dop">ドップラー効果</span> <span class="hint" data-t="dopnote">(色 + 明るさ g&#8308;)</span></label>
         <label class="check"><input id="big" type="checkbox"> <span data-t="big">文字を大きく (投影用)</span></label>
         <div><button id="photo" data-t="photoBtn">撮影向けの表示 (P)</button>
-          <p class="hint" data-t="photonote">パネルを消して計器を大きく。もう一度 P で計器も消す、Esc で戻る。</p></div>
+          <p class="hint" data-t="photonote">パネルを消して計器を大きく。もう一度 P で計器も消す、Esc で戻る。時間を止めてから撮ると、他機も止まった 1 つの事象の写真になる。</p></div>
         <label class="check"><input id="dev" type="checkbox"> <span data-t="dev">開発用の数値 (fps・f32 の誤差・時計)</span></label>
       </div>
     </details>
-    <p class="keys kbd-only"><span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> <span data-t="kThrust">推力</span></span>
-      <span><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> <span data-t="kLook">見回す</span></span>
-      <span><kbd>H</kbd> <span data-t="kHide">UI を消す</span></span> <span><kbd>?</kbd> <span data-t="kHelp">飛び方</span></span></p>
+    <p class="keys"><span class="kbd-only"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> <span data-t="kThrust">推力</span></span>
+      <span class="kbd-only"><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> <span data-t="kLook">見回す</span></span>
+      <span class="kbd-only"><kbd>Space</kbd> <span data-t="kTime">時間を止める</span></span>
+      <span class="kbd-only"><kbd>H</kbd> <span data-t="kHide">UI を消す</span></span>
+      <a id="lang" href="?lang=en">English</a></p>
   </div>
 </aside>
 <div id="hud" aria-label="計器" data-tl="hudLabel">
-  <div class="card"><span class="k" data-t="hObs">観測者</span><span class="v" id="hObs"></span></div>
+  <div class="card"><span class="k" data-t="hObs">観測者</span><span class="v"><span id="hObs"></span><span id="hPaused" class="badge time" hidden></span></span></div>
   <div class="card"><span class="k" id="hRk"></span><span class="v"><span id="hR"></span> <span class="unit">r<sub>S</sub></span><span id="hIn" class="badge" hidden></span></span></div>
-  <div class="card" id="cTau"><span class="k" id="hTauK"></span><span class="v" id="hTau"></span><span class="s" id="hTauS"></span></div>
+  <div class="card" id="cTau"><span class="k" id="hTauK"></span><span class="v"><span id="hTau"></span> <span class="unit">r<sub>S</sub>/c</span></span><span class="s" id="hTauS"></span></div>
   <div class="card" id="cBeta"><span class="k" id="hBetaK"></span><span class="v" id="hBeta"></span><span class="s" id="hGam"></span></div>
   <div class="card" id="cE" hidden><span class="k">E</span><span class="v" id="hE"></span></div>
   <div class="card" id="cL" hidden><span class="k">L</span><span class="v" id="hL"></span></div>
@@ -273,22 +354,39 @@
   (bsrender<span data-t="comma">、</span>ESA Gaia EDR3)<span data-t="comma">、</span>
   <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener">CC BY-SA 4.0</a><span data-t="comma">、</span><span data-t="downscaled">縮小して使用</span></p>
 <div id="uihint" role="status" hidden></div>
+<div id="coach" role="note" aria-labelledby="coachtitle" hidden>
+  <p id="coachtitle" class="ct" data-t="coachTitle">はじめに</p>
+  <ul class="kbd-only">
+    <li data-t="cLook">ドラッグか <kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> で見回す</li>
+    <li data-t="cNear">位置 R のスライダで近づく (地平面の内側まで)</li>
+    <li data-t="cFly"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> で飛ぶ · <kbd>Space</kbd> で時間を止める</li>
+  </ul>
+  <ul class="touch-only">
+    <li data-t="tcLook">ドラッグで見回す</li>
+    <li data-t="tcNear">パネルの位置 R で近づく (地平面の内側まで)</li>
+    <li data-t="tcTime">パネルの上の端の ⏸ で時間を止める</li>
+  </ul>
+  <div class="cb"><button id="coachmore" data-t="coachMore">すべての操作 (?)</button>
+    <button id="coachok" class="primary" data-t="coachOk">わかった</button></div>
+</div>
 <dialog id="help" aria-labelledby="helptitle">
   <h2 id="helptitle" data-t="helpTitle">飛び方</h2>
   <dl class="kgrid kbd-only">
-    <dt><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></dt><dd data-t="hThrust">推力 (前・左・後ろ・右)。離すと静止に戻る (地平面の内側では慣性で進む)。</dd>
+    <dt><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd></dt><dd data-t="hThrust">推力 (前・左・後ろ・右)。自由飛行では離すと慣性で進み、静止の観測者は離すと止まる。</dd>
     <dt><kbd>←</kbd> <kbd>↑</kbd> <kbd>↓</kbd> <kbd>→</kbd></dt><dd data-t="hLook">見回す (ドラッグでも)。ホイールで視野角。</dd>
-    <dt><kbd>0</kbd> <kbd>C</kbd></dt><dd data-t="hModes">静止 · 円軌道。</dd>
+    <dt><kbd>Space</kbd></dt><dd data-t="hTime">時間を止める · 動かす (どの観測者でも同じ)。止めた画面は 1 つの事象の写真で、他機の時計も止まる。</dd>
+    <dt><kbd>0</kbd> <kbd>C</kbd> <kbd>F</kbd></dt><dd data-t="hModes">観測者を静止 · 円軌道 · 自由飛行 (今の速度のまま) に。観測者を選ぶと時間が動き出す。</dd>
     <dt><kbd>H</kbd> <kbd>P</kbd></dt><dd data-t="hHide">UI をすべて消す · 撮影向けの表示。</dd>
     <dt><kbd>?</kbd> <kbd>Esc</kbd></dt><dd data-t="hHelp">この説明 · 閉じて画面に戻る。</dd>
   </dl>
   <dl class="kgrid touch-only">
     <dt data-t="tDrag">ドラッグ</dt><dd data-t="tLook">見回す。</dd>
-    <dt data-t="tSheet">下のパネル</dt><dd data-t="tSheetDo">観測者と位置 R を選ぶ。</dd>
-    <dt data-t="tThrust">推力</dt><dd data-t="tThrustDo">キーボードの W/A/S/D (スマホの推力は次の版)。</dd>
+    <dt data-t="tSheet">パネル</dt><dd data-t="tSheetDo">観測者と位置 R を選ぶ。上の端の ⏸ で時間を止める (止めた画面は 1 つの事象の写真)。</dd>
+    <dt data-t="tThrust">推力</dt><dd data-t="tThrustDo">キーボードの W/A/S/D (スマホの推力は次の版。自由飛行は慣性で進む)。</dd>
   </dl>
-  <p class="hint" data-t="hObserver">観測者が替わるのは、パネルで選んだときと、飛ぶ・回る・落ちる操作のときだけ。位置 R のスライダは今の観測者を動かすだけで、静止の観測者は地平面の直上 R = 1.02 で止まる (地平面の内側へは自由落下で)。</p>
-  <form method="dialog"><button class="primary" data-t="helpOk">はじめる</button></form>
+  <p class="hint" data-t="hObserver">自由落下の観測者は、時間が動いている間ずっと落ちる。観測者が替わるのは、パネルで選んだときと、飛ぶ・回る操作のときだけ。位置 R のスライダは今の観測者を動かし、静止の観測者は地平面の直上 R = 1.02 で止まる (内側へは自由落下で)。</p>
+  <p class="hint" data-t="shipsnote">画面の札の付いた「他機」 は r = 8 の円軌道を回る 1 機で、像ごとに光の遅れ・ドップラー・円盤の陰がつく (パネルの「他機」 で消せる)。</p>
+  <form method="dialog"><button class="primary" data-t="helpOk">閉じる</button></form>
 </dialog>
 <script src="ships.js"></script>
 <script>
@@ -297,9 +395,9 @@
 // The Japanese text is the markup itself; with LANG = en every [data-t]
 // element takes I18N.en[key] as its content, [data-tl] as its aria-label and
 // [data-tt] as its title.  Strings written at run time (HUD, camera
-// messages, the fall button) come from t(key, ...args) in both languages
-// (check_i18n.py checks that every key exists in both).  The link next to
-// the title reloads the page in the other one.
+// messages, the time toggle's label) come from t(key, ...args) in both
+// languages (check_i18n.py checks that every key exists in both).  The link
+// at the panel's foot reloads the page in the other one.
 const LANG = (() => {
   const q = new URLSearchParams(location.search).get("lang");
   if (q === "en" || q === "ja") return q;
@@ -319,14 +417,23 @@ const I18N = {
     rateNoteUp: (m, mass) => `${mass} の実時間の ${m} 倍`,
     rateNoteDown: (mass, inv) => `${mass} の実時間の 1/${inv}`,
     min: "分", hour: "時間", day: "日",
-    fall: "▶ 自由落下", stop: "■ 止める",
+    pauseLabel: "時間を止める (Space)", playLabel: "時間を動かす (Space)",
+    paused: "時間停止中",
+    pausedMsg: "時間を止めた: 今の画面は 1 つの事象の写真 (Space か ▶ で動かす)",
+    fallEnd: "r = 0.001 rS (表の下端) まで落ちた。ここより内側は描けないので時間を止めた",
     foldLabel: "パネルを畳む", unfoldLabel: "パネルを開く",
-    endDeep: "r = 0.001 rS (表の下端) で飛行を終えました",
-    endGamma: (r, g) => `r = ${r} rS: 自由落下系に対する速さが光速に近づき (γ > ${g})、表示の限界で飛行を終えました`,
+    endDeep: "r = 0.001 rS (表の下端) で飛行を終え、時間を止めた",
+    endGamma: (r, g) => `r = ${r} rS: 自由落下系に対する速さが光速に近づき (γ > ${g})、表示の限界で飛行を終えて時間を止めた`,
     noFlyDeep: "r = 0.001 rS (表の下端) からは飛べません",
     flyInside: "地平面の近く／内側: 自由落下系に静止して飛び始めました (推力は E・L を変える)",
-    flyHere: "ここから自由飛行 (重力補償中)",
-    flyFromFall: "ここから自由飛行 (自由落下の速度から。離すと静止に戻る)",
+    flyHere: "ここから自由飛行 (静止から。推力だけで、離すと慣性で進む)",
+    flyFromFall: "ここから自由飛行 (自由落下の速度から。離すと落下が続く)",
+    hoverThrust: "静止の観測者を推力で動かす (高度保持と減衰つき。離すと止まる。F で自由飛行へ)",
+    staticToFly: "今の速度のまま自由飛行へ (高度保持と減衰を外した)",
+    hoverEnds: "R < 1.02 rS では静止を保てないので自由飛行へ (高度保持と減衰を外した)",
+    thrustCut: g => `γ ≥ ${g}: 表示の限界なので、速さを上げる向きの推力を切った (向きを変える推力と減速は効く)`,
+    hoverMoving: "推力で移動中", hoverSettling: "止まるところ (減衰中)",
+    gammaCap: "(上限)",
     flyInsideStatic: "地平面の直上: 静止の速度から飛び始めました (ここでは静止を保てない。推力は E・L を変える)",
     orbitMin: "安定な円軌道は R > 3 rS で選べます",
     orbitOn: "円軌道に入りました",
@@ -335,8 +442,8 @@ const I18N = {
     noHover: "地平面の直上 (1 ≤ R < 1.02) では静止できません",
     hovering: "静止 (重力補償中)",
     noStatic: "地平面の内側では静止できないので自由落下の視界",
-    nameStatic: "静止の観測者", nameFall: "自由落下の観測者 (E = 1)",
-    nameOrbit: "円軌道 (測地線)", namePilot: "操縦者 (推力)",
+    nameStatic: "静止", nameFall: "自由落下 (E = 1)",
+    nameOrbit: "円軌道", namePilot: "自由飛行",
     floorStatic: "静止の観測者は R = 1.02 rS まで (その内側では静止を保てず、地平面の内側には存在しない)。内側へは自由落下で。",
     floorOrbit: "安定な円軌道は R > 3 rS だけ。",
     toFall: "自由落下に切り替える", toStatic: "静止に切り替える",
@@ -344,17 +451,16 @@ const I18N = {
     noStaticHere: "R < 1.02 rS には静止の観測者がいません (地平面の内側には存在しない)",
     sliderToStatic: "スライダ: 操縦者を静止系で止めました (静止の観測者)",
     sliderToFall: "スライダ: 操縦者を自由落下系で止めました (自由落下の観測者)",
-    descStatic: "ロケットで重力に逆らって止まっている観測者 (R ≥ 1.02)。",
-    descFall: "無限遠の静止から真っすぐ落ちる観測者 (E = 1)。▶ で落ちる。",
-    descOrbit: "安定な円軌道を回る観測者 (R > 3)。",
-    descPilot: "W/A/S/D の推力で飛ぶ。離すと静止に戻る (地平面の内側では慣性で進む)。",
+    descStatic: "ロケットで重力に逆らって止まっている観測者 (R ≥ 1.02)。W/A/S/D で動かせて、離すと止まる。",
+    descFall: "無限遠の静止から真っすぐ落ちる観測者 (E = 1)。時間が動けば落ちる。W/A/S/D でその速度から自由飛行へ。",
+    descOrbit: "安定な円軌道を回る観測者 (R > 3)。W/A/S/D で自由飛行へ。",
+    descPilot: "W/A/S/D の推力 (自分の系で一定の加速度) だけで飛ぶ。離すと慣性で進む (測地線、E と L は変わらない)。",
     offStatic: "静止は R ≥ 1.02 で選べる。", offOrbit: "円軌道は R > 3 で選べる。",
     pilotTouch: "推力はキーボードの W/A/S/D (スマホの推力は次の版)",
     hudPos: "位置 R", hudPosIn: "位置 r", inside: "地平面の内側",
-    tauHor: "地平面まで", tauHorIf: "落ちれば地平面まで",
+    tauHor: "地平面まで", tauDrop: "手を離せば地平面まで", tauCoastHor: "慣性で地平面まで",
     tauSing: "特異点まで", tauSingCoast: "慣性で特異点まで",
     betaStatic: "速さ (静止系に対して)", betaFall: "速さ (自由落下系に対して)",
-    falling: "落下中",
     uiOffHint: "H で表示を戻す",
     photoHint1: "撮影向けの表示: P で計器も消す · Esc で戻る",
     photoHint2: "撮影向けの表示 (計器なし): P か Esc で戻る",
@@ -383,33 +489,48 @@ const I18N = {
     massnote: "Only converts the times to seconds; the picture does not change.",
     eternal: "Eternal black hole",
     eternalnote: "An idealization that also shows the universe on the other side; a real hole formed by collapse = off.",
+    scene: "In space",
     ships: "Other ships",
-    shipsnote: "One ship on a circular orbit at r = 8; each image carries its light delay, Doppler shift and the disk's shadow.",
+    shipsnote: "The tagged “other ship” goes round a circular orbit at r = 8; each image has its light delay, " +
+      "Doppler shift and the disk's shadow (the panel's “Other ships” turns it off).",
+    shipTag: "Other ship · orbit at r = 8",
     dop: "Doppler effect",
     dopnote: "(color + brightness g&#8308;)",
     big: "Large text (for a projector)",
     photoBtn: "Photo view (P)",
-    photonote: "Hides the panel and enlarges the instruments. P again also hides the instruments; Esc returns.",
+    photonote: "Hides the panel and enlarges the instruments. P again also hides the instruments; Esc returns. " +
+      "Pause time first for a photo of a single event, with the other ship stopped too.",
     dev: "Developer numbers (fps, f32 error, clock)",
-    kThrust: "thrust", kLook: "look around", kHide: "hide UI", kHelp: "how to fly",
+    kThrust: "thrust", kLook: "look around", kTime: "pause time", kHide: "hide UI",
     hObs: "Observer",
     devk: "Developer",
     skyimage: "Milky Way:",
     comma: ", ",
     downscaled: "downscaled",
+    coachTitle: "Getting started",
+    cLook: "Drag or use <kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> to look around",
+    cNear: "Move closer with the position slider R (into the horizon)",
+    cFly: "<kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to fly · <kbd>Space</kbd> pauses time",
+    tcLook: "Drag to look around",
+    tcNear: "Move closer with the panel's position R (into the horizon)",
+    tcTime: "The ⏸ at the top edge of the panel pauses time",
+    coachMore: "All controls (?)", coachOk: "Got it",
     helpTitle: "How to fly",
-    hThrust: "Thrust (forward, left, back, right). Release to return to rest (inside the horizon you coast).",
+    hThrust: "Thrust (forward, left, back, right). In free flight you coast when you release the keys; the static observer stops.",
     hLook: "Look around (or drag). The wheel sets the field of view.",
-    hModes: "Static · circular orbit.",
+    hTime: "Pause and resume time (the same for every observer). A paused view is a photo of a single event; " +
+      "the other ship's clock stops too.",
+    hModes: "Observer: static · circular orbit · free flight (keeping the velocity). Choosing an observer resumes time.",
     hHide: "Hide every UI element · photo view.",
     hHelp: "This card · close it and return to the view.",
     tDrag: "Drag", tLook: "Look around.",
-    tSheet: "The panel below", tSheetDo: "Choose the observer and the position R.",
-    tThrust: "Thrust", tThrustDo: "W/A/S/D on a keyboard (thrust on phones comes in the next version).",
-    hObserver: "The observer changes only when you choose one in the panel and when you fly, orbit or fall. " +
-      "The position slider moves the current observer; the static observer stops just above the horizon at " +
-      "R = 1.02 (go inside as the free-fall observer).",
-    helpOk: "Start",
+    tSheet: "The panel", tSheetDo: "Choose the observer and the position R. The ⏸ at its top edge pauses time " +
+      "(a paused view is a photo of a single event).",
+    tThrust: "Thrust", tThrustDo: "W/A/S/D on a keyboard (thrust on phones comes in the next version; free flight coasts).",
+    hObserver: "The free-fall observer keeps falling while time runs. The observer changes only when you choose one " +
+      "in the panel and when you fly or orbit. The position slider moves the current observer; the static observer " +
+      "stops just above the horizon at R = 1.02 (go inside as the free-fall observer).",
+    helpOk: "Close",
     webgl2: "WebGL2 is required",
     error: "Error: ",
     binSize: (name, got, want) => `${name}.bin does not match meta.json in size ` +
@@ -422,14 +543,23 @@ const I18N = {
     rateNoteUp: (m, mass) => `${m}× real time for ${mass}`,
     rateNoteDown: (mass, inv) => `1/${inv} of real time for ${mass}`,
     min: "min", hour: "h", day: "days",
-    fall: "▶ Free fall", stop: "■ Stop",
+    pauseLabel: "Pause time (Space)", playLabel: "Resume time (Space)",
+    paused: "paused",
+    pausedMsg: "Time paused: the view is now a photo of a single event (Space or ▶ resumes)",
+    fallEnd: "Fell to r = 0.001 rS (the end of the table); nothing further in can be drawn, so time is paused",
     foldLabel: "Fold the panel", unfoldLabel: "Open the panel",
-    endDeep: "Flight ended at r = 0.001 rS (the end of the table)",
-    endGamma: (r, g) => `r = ${r} rS: speed relative to the free-fall frame near c (γ > ${g}); flight ended at the display limit`,
+    endDeep: "Flight ended at r = 0.001 rS (the end of the table); time is paused",
+    endGamma: (r, g) => `r = ${r} rS: speed relative to the free-fall frame near c (γ > ${g}); flight ended at the display limit and time is paused`,
     noFlyDeep: "Cannot fly from r = 0.001 rS (the end of the table)",
     flyInside: "Near or inside the horizon: flying from rest in the free-fall frame (thrust changes E and L)",
-    flyHere: "Free flight from here (gravity-compensated hover)",
-    flyFromFall: "Free flight from here, from the free faller's velocity (release to settle to a hover)",
+    flyHere: "Free flight from here, from rest (thrust only; release to coast)",
+    flyFromFall: "Free flight from here, from the free faller's velocity (release to keep falling)",
+    hoverThrust: "Moving the static observer with thrust (altitude hold and damping; release to stop; F for free flight)",
+    staticToFly: "Free flight at the current velocity (altitude hold and damping off)",
+    hoverEnds: "No hover below R = 1.02 rS, so free flight (altitude hold and damping off)",
+    thrustCut: g => `γ ≥ ${g}: thrust that would raise the speed is cut at the display limit (steering and braking still work)`,
+    hoverMoving: "moving under thrust", hoverSettling: "settling (damped)",
+    gammaCap: "(cap)",
     flyInsideStatic: "Just above the horizon: flying from the static observer's velocity (no hover here; thrust changes E and L)",
     orbitMin: "Stable circular orbits need R > 3 rS",
     orbitOn: "On a circular orbit",
@@ -438,8 +568,8 @@ const I18N = {
     noHover: "Cannot hover just above the horizon (1 ≤ R < 1.02)",
     hovering: "Hovering (gravity-compensated)",
     noStatic: "No static observer inside the horizon: free-fall view",
-    nameStatic: "Static observer", nameFall: "Free-fall observer (E = 1)",
-    nameOrbit: "Circular orbit (geodesic)", namePilot: "Pilot (thrust)",
+    nameStatic: "Static", nameFall: "Free fall (E = 1)",
+    nameOrbit: "Circular orbit", namePilot: "Free flight",
     floorStatic: "The static observer stops at R = 1.02 rS (it cannot stay at rest closer, and none exists inside the horizon). Go inside as the free-fall observer.",
     floorOrbit: "Stable circular orbits exist only for R > 3 rS.",
     toFall: "Switch to free fall", toStatic: "Switch to static",
@@ -447,17 +577,16 @@ const I18N = {
     noStaticHere: "No static observer below R = 1.02 rS (none exists inside the horizon)",
     sliderToStatic: "Slider: the pilot is stopped in the static frame (static observer)",
     sliderToFall: "Slider: the pilot is stopped in the free-fall frame (free-fall observer)",
-    descStatic: "Holds its place against gravity with a rocket (R ≥ 1.02).",
-    descFall: "Falls straight in from rest at infinity (E = 1). ▶ makes it fall.",
-    descOrbit: "Goes round a stable circular orbit (R > 3).",
-    descPilot: "Fly with W/A/S/D. Release to return to rest (inside the horizon you coast).",
+    descStatic: "Holds its place against gravity with a rocket (R ≥ 1.02). W/A/S/D move it; release to stop.",
+    descFall: "Falls straight in from rest at infinity (E = 1) whenever time runs. W/A/S/D: free flight from its velocity.",
+    descOrbit: "Goes round a stable circular orbit (R > 3). W/A/S/D: free flight.",
+    descPilot: "Fly with W/A/S/D thrust only (a constant acceleration in your own frame). Release to coast on a geodesic (E and L stay fixed).",
     offStatic: "Static needs R ≥ 1.02.", offOrbit: "Orbit needs R > 3.",
     pilotTouch: "Thrust is W/A/S/D on a keyboard (thrust on phones comes in the next version)",
     hudPos: "Position R", hudPosIn: "Position r", inside: "inside the horizon",
-    tauHor: "To the horizon", tauHorIf: "To the horizon if it fell",
+    tauHor: "To the horizon", tauDrop: "To the horizon if released", tauCoastHor: "To the horizon, coasting",
     tauSing: "To the singularity", tauSingCoast: "To the singularity, coasting",
     betaStatic: "Speed (vs. static frame)", betaFall: "Speed (vs. free-fall frame)",
-    falling: "falling",
     uiOffHint: "H brings the display back",
     photoHint1: "Photo view: P also hides the instruments · Esc returns",
     photoHint2: "Photo view (no instruments): P or Esc returns",
@@ -479,17 +608,18 @@ if (LANG === "en") {
   link.href = "?lang=" + other;
   link.textContent = other === "en" ? "English" : "日本語";
 }
-document.getElementById("fall").textContent = t("fall");
 
 // ---- the UI's own state (nothing here touches the camera).  The panel
 // folds to its title bar (the button by the title).  H hides every UI
 // element and brings them back; the panel is folded while hidden, so the
 // release check's "H folds the panel" holds.  P cycles the photo view: the
 // panel hidden and the HUD at print size, then no HUD, then back (Esc
-// returns).  "?" opens the card "how to fly"; it opens by itself on a first
-// visit (not under automation: navigator.webdriver) and not again once
-// closed.  That and the large text are remembered in localStorage, read
-// through try/catch (it may throw or be empty: private windows, previews).
+// returns).  "?" opens the card "how to fly".  A first visit (not under
+// automation: navigator.webdriver) shows the small note "getting started"
+// instead (not modal: the first picture stays in view), and not again once
+// closed; until 2026-11-04 the card itself opened.  That and the large text
+// are remembered in localStorage, read through try/catch (it may throw or
+// be empty: private windows, previews).
 const $ = id => document.getElementById(id);
 const store = {
   get(k){ try { return localStorage.getItem("bhviewer." + k); } catch (e) { return null; } },
@@ -527,19 +657,27 @@ function setBig(on){
   $("big").checked = on;
   store.set("big", on ? "1" : "0");
 }
+function closeCoach(){
+  if ($("coach").hidden) return;
+  $("coach").hidden = true;
+  store.set("coachSeen", "1");
+}
 function openHelp(){
+  closeCoach();
   const d = $("help");
   if (d.open) return;
   if (typeof d.showModal === "function") d.showModal(); else d.setAttribute("open", "");
 }
-$("help").addEventListener("close", () => { store.set("helpSeen", "1"); $("gl").focus(); });
+$("help").addEventListener("close", () => { $("gl").focus(); });
 $("helpbtn").addEventListener("click", openHelp);
+$("coachmore").addEventListener("click", openHelp);
+$("coachok").addEventListener("click", () => { closeCoach(); $("gl").focus(); });
 $("fold").addEventListener("click", () => setFolded(!$("panel").classList.contains("folded")));
 $("photo").addEventListener("click", () => setPhoto(1));
 $("big").addEventListener("change", () => setBig($("big").checked));
 setFolded(false);
 setBig(store.get("big") === "1" || new URLSearchParams(location.search).get("big") === "1");
-if (store.get("helpSeen") !== "1" && !navigator.webdriver) openHelp();
+if (store.get("coachSeen") !== "1" && !navigator.webdriver) $("coach").hidden = false;
 // the HUD's and the phone sheet's heights, for the elements placed around them
 if (typeof ResizeObserver === "function") {
   const ro = new ResizeObserver(() => {
@@ -1484,13 +1622,19 @@ async function main(){
   const RS_SEC = { sun: 9.851e-6, SgrA: 9.851e-6 * 4.30e6, M87: 9.851e-6 * 6.5e9 };
   // Proper-time rate: wall-clock seconds advance the camera's proper time at
   // the real rate of the selected mass (1 r_S/c = RS_SEC[mass] seconds) times
-  // the multiplier of the speed slider, 1e-4 .. 1e4 (log), default x1 = real
+  // the multiplier of the speed slider, 1e-4 .. 1e4, default x1 = real
   // time everywhere, inside and outside the horizon (user 2026-10-13「固有時間
   // の倍率は常時１でよいのでは？」; Sgr A* then gives 28 s from the horizon in
   // radial free fall and up to 66 s at E = 0).  Nothing but the slider
-  // changes the multiplier.
-  const MULT_DECADES = 4;
-  const multOf = () => Math.pow(10, MULT_DECADES * (2 * parseFloat(el("spd").value) - 1));
+  // changes the multiplier.  The slider has 25 notches, 1, 2, 5 x 10^k (x1 in
+  // the middle, the slider's value 0.5 as before), so the rate is a round
+  // number (2026-11-04; the continuous log slider gave x98 or x110).  Time
+  // itself runs or is paused for every observer alike (`paused` below).
+  const MULT_DECADES = 4, RATE_NOTCHES = 6 * MULT_DECADES;
+  const multOf = () => {
+    const k = clamp(Math.round(RATE_NOTCHES * parseFloat(el("spd").value)), 0, RATE_NOTCHES);
+    return [1, 2, 5][k % 3] * Math.pow(10, Math.floor(k / 3) - MULT_DECADES);
+  };
   const rateOf = () => multOf() / RS_SEC[el("mass").value];      // r_S/c per wall second
   // the time-rate control: "×m" and, under the slider, what it means
   function fmtRate(){
@@ -1552,10 +1696,26 @@ async function main(){
   // is the UI for picking a start radius, never a clamp.
   const R_SWITCH = 1.02;
   const FLIGHT_STEP = 0.02, FLIGHT_FRAME_BUDGET = 0.04;
-  // Pilot thrust and speed damping (proper acceleration in c^2/r_S, damping
-  // per r_S/c of proper time): the top speed is u = THRUST/DAMPING (= 0.625,
-  // beta 0.53), reached on a 1/DAMPING = 0.6 r_S/c time scale.
+  // Pilot thrust (proper acceleration in c^2/r_S) and speed damping (per r_S/c
+  // of proper time).  Thrust is a constant proper acceleration in the pilot's
+  // own frame (2026-11-04, DESIGN.md "自由飛行で離したら慣性で進む"): from rest,
+  // beta 0.9 takes 1.47 r_S/c (62 s at x1 for Sgr A*).  Free flight is thrust
+  // only, so a released key coasts on a geodesic.  The altitude hold and the
+  // damping act only on the static observer moved by thrust: its top speed is
+  // beta = THRUST/DAMPING (0.625, u = 0.80), reached on a 1/DAMPING = 0.6 r_S/c
+  // time scale, and a released key settles it back to rest.
   const PILOT_THRUST = 1.0, FLIGHT_DAMPING = 1.6;
+  // Outside R_SWITCH, thrust that would raise gamma relative to the static
+  // observer past THRUST_GAMMA_MAX is cut (the flight goes on): with no
+  // damping gamma grows as cosh(alpha tau), and the shader's f32 aberration
+  // error grows as gamma^2 (1.5e-4 rad at 30, 1.4e-2 at 300; table 3.4e-5,
+  // one pixel 1.7e-3).
+  // Inside, LEM_GAMMA_MAX (the same 30) ends the flight as before.
+  const THRUST_GAMMA_MAX = 30;
+  // the static observer moved by thrust is at rest again (drawn without the
+  // integrator) once the keys are up and |u| is below this (an aberration of
+  // 1e-4 rad = 0.06 px at fov 100 deg over 1000 px)
+  const SETTLE_U = 1e-4;
   const setSliderFromR = R => { el("R").value = clamp(RToSlider(R), 0, 1); };
   setSliderFromR(R_DEFAULT);
 
@@ -1568,20 +1728,61 @@ async function main(){
   const camera = {
     R: R_DEFAULT, rHat: [0, 0, 1], hHat: [0, 1, 0],
     E: 0, L: 0, rd: 0, active: false, lastNow: performance.now(),
-    timeDebt: 0, orbitLock: false, interior: false, message: "",
+    timeDebt: 0, interior: false, message: "",
+    // thrustCut: the gamma cap is cutting the thrust (THRUST_GAMMA_MAX);
+    // tau: the flight's proper time, and lastSwitch: the state at the last
+    // R_SWITCH crossing with its rotation (both for the checks, __bh.state)
+    thrustCut: false, tau: 0, lastSwitch: null,
     // the camera's clock for the other ships: ingoing Eddington-Finkelstein
     // time v = t + r*, finite through the horizon (ships.py); advanced in
     // coast() (pilot), fallStep() (closed form) and staticClock() (at rest)
     v: 0,
+    // ptau: the camera's own proper time since the page opened, whatever the
+    // observer (for the checks, __bh.state; tau above is the flight's)
+    ptau: 0,
   };
+  // ---- time runs or is paused, for every observer alike (DESIGN.md "UI の見直し:
+  // 時間を 1 つの状態に", 2026-11-04).  While it runs every observer follows
+  // its worldline (the free faller falls, the static observer's clock runs,
+  // an orbit or a flight is integrated); paused, every observer is a photo
+  // of one event: R, the view, the clock v (so the other ships) and E, L do
+  // not change, while looking around, the field of view, the disk, the sky
+  // and the R slider still work.  Until 2026-11-04 only a fall could stop and
+  // the free-fall observer stood still at R unless its fall button was on,
+  // with its clock running.
+  // Choosing an observer (control, 0, C, F) and W/A/S/D resume time; a fall
+  // or a flight that reaches the interior table's last row pauses it.
+  // Resuming never catches up: while paused every clock's last frame time is
+  // set to now (draw).  The R slider held by a pointer holds time too (as a
+  // video scrubs), so a fall does not fight the finger for the thumb.
+  let paused = false, scrubbing = false;
+  function setPaused(p, message){
+    paused = p;
+    const now = performance.now();
+    camera.lastNow = now; camera.timeDebt = 0; fallLast = now; clockLast = now;
+    if (message !== undefined) camera.message = message;
+    showPlay();
+    uiTick = 0;
+  }
+  function showPlay(){
+    const b = el("play"), label = t(paused ? "playLabel" : "pauseLabel");
+    b.classList.toggle("paused", paused);
+    if (b.getAttribute("aria-label") !== label) { b.setAttribute("aria-label", label); b.title = label; }
+  }
+  // the user's toggle (the title bar's button, Space)
+  function togglePause(){ setPaused(!paused, paused ? "" : t("pausedMsg")); }
+  // what an explicit choice of observer and W/A/S/D do first
+  function resumeTime(){ if (paused) setPaused(false, ""); }
   const keys = new Set();
   // ---- the observer is an explicit state (DESIGN.md "R スライダの R = 1 の
   // 跳び", 2026-10-29).  "freefall" = the radial free faller (E = 1, L = 0)
-  // at camera.R, moving only while the fall runs; "static" = the static
+  // at camera.R, falling whenever time runs (fallStep); "static" = the static
   // observer at rest; "orbit" = the circular geodesic (C); "pilot" = free
-  // flight under thrust.  freefall and static are drawn at rest
+  // flight (thrust, else a geodesic).  freefall and static are drawn at rest
   // (camera.active false), orbit and pilot by the flight integrator
-  // (camera.active true).  Only the observer control, a flight, an orbit, a
+  // (camera.active true); so is the static observer while thrust moves it
+  // (W/A/S/D from the static observer: altitude hold and damping, at rest
+  // again after the keys are up, 2026-11-04).  Only the observer control, a flight, an orbit, a
   // fall or 0 change it; the R slider moves the camera of the current mode
   // and stops at that mode's floor.  No static observer exists at or inside
   // the horizon and its view degenerates as R -> 1+ (the outside sky shrinks
@@ -1669,6 +1870,30 @@ async function main(){
                           drawn: !im.hidden && !im.frozen && im.aIn > 0 && im.g > 0 });
       }
     }
+  }
+  // The other ship's name tag (2026-11-04: a ship on the picture that nothing
+  // named): at the lowest-order
+  // drawn image (the direct one when it is drawn), projected as the shader
+  // does (probeShips' pixelOf), in CSS pixels from the top left.  Hidden
+  // when the ships are off, the image is off the screen or behind the
+  // camera, and (CSS) in the photo view and with H.
+  function placeShipTag(b, aspect, th){
+    const tag = el("shiptag");
+    let p = null;
+    if (el("ships").checked) {
+      const ims = shipImages.filter(s => s.drawn).sort((a, c) => a.n - c.n);
+      if (ims.length) {
+        const d = ims[0].dCam, f = dot3(d, b.fwd);
+        if (f > 0) {
+          const x = (dot3(d, b.right) / f / (th * aspect) + 1) / 2;
+          const y = 1 - (dot3(d, b.up) / f / th + 1) / 2;
+          if (x > 0.01 && x < 0.99 && y > 0.01 && y < 0.99) p = [x * canvas.clientWidth, y * canvas.clientHeight];
+        }
+      }
+    }
+    if (!p) { if (!tag.hidden) tag.hidden = true; return; }
+    if (tag.hidden) tag.hidden = false;
+    tag.style.transform = `translate(${p[0].toFixed(1)}px, ${p[1].toFixed(1)}px)`;
   }
   function uploadShips(pxAngle){
     const drawn = shipImages.filter(s => s.drawn);
@@ -1794,6 +2019,9 @@ async function main(){
   }
   function switchConvention(toInterior){
     const Rot = conventionRotation();
+    camera.lastSwitch = { toInterior, R: camera.R, rHat: [...camera.rHat], hHat: [...camera.hHat],
+                          E: camera.E, L: camera.L, rd: camera.rd, Rot,
+                          fwd: [...view.fwd], up: [...view.up] };
     const f = toInterior
       ? d => Rot.map(row => dot3(row, d))
       : d => [0, 1, 2].map(i => Rot[0][i] * d[0] + Rot[1][i] * d[1] + Rot[2][i] * d[2]);
@@ -1847,25 +2075,34 @@ async function main(){
     const dPhi = h / 6 * (k1[2] + 2 * k2[2] + 2 * k3[2] + k4[2]);
     camera.v += h / 6 * (k1[3] + 2 * k2[3] + 2 * k3[3] + k4[3]);
     if (Rnext <= Rmin) {
-      // the interior table's last row: the flight ends where the fall does
+      // the interior table's last row: the flight ends where the fall does,
+      // and time stops at that event (nothing further in can be drawn)
       camera.R = Rmin; camera.rd = rdNext;
       camera.active = false; camera.interior = false; camera.timeDebt = 0;
-      keys.clear(); setMode("freefall", t("endDeep"));
+      keys.clear(); setMode("freefall"); setPaused(true, t("endDeep"));
       setSliderFromR(Rmin);
       return false;
     }
     // Crossing R_SWITCH changes the reference frame (static <-> free fall).
     // The view basis is rotated where the static frame still exists
     // (R >= 1.02): before the step going in, after the step coming out.
-    if (!camera.interior && Rnext < R_SWITCH) switchConvention(true);
+    // No hover exists inside: the static observer moved by thrust becomes a
+    // pilot there with its velocity (the hold and the damping stop).
+    if (!camera.interior && Rnext < R_SWITCH) {
+      switchConvention(true);
+      if (mode === "static") setMode("pilot", t("hoverEnds"));
+    }
     camera.R = Rnext; camera.rd = rdNext;
     camera.rHat = unit(rotateAround(camera.rHat, camera.hHat, dPhi));
     if (camera.interior && Rnext >= R_SWITCH) switchConvention(false);
     if (camera.interior) {
       const bl = lemaitreBeta(), gam = 1 / Math.sqrt(1 - dot3(bl, bl));
       if (gam > LEM_GAMMA_MAX) {
+        // the view becomes the free faller's at this event (an explicit
+        // change of observer that the display limit forces), paused there
         camera.active = false; camera.interior = false; camera.timeDebt = 0;
-        keys.clear(); setMode("freefall", t("endGamma", camera.R.toPrecision(2), LEM_GAMMA_MAX));
+        keys.clear(); setMode("freefall");
+        setPaused(true, t("endGamma", camera.R.toPrecision(2), LEM_GAMMA_MAX));
         return false;
       }
     }
@@ -1879,52 +2116,75 @@ async function main(){
     if (keys.has("a")) v = sub(v, right);
     return norm(v) > 1e-12 ? unit(v) : null;
   }
-  function altitudeHoldAcceleration(){
+  function altitudeHoldAcceleration(beta){
     // Static-observer support plus the tangential centrifugal correction.
     // It is outward at rest and exactly zero on a geodesic circular orbit.
+    // Used only by the static observer moved by thrust (its hover): a game
+    // control, defined as a rate in the static frame and not boosted.
     const R = camera.R, A = 1 - 1 / R;
-    const beta = flightBeta(), b2 = dot3(beta, beta);
+    const b2 = dot3(beta, beta);
     const betaR = dot3(beta, camera.rHat);
     const betaT2 = Math.max(b2 - betaR * betaR, 0);
     const magnitude = 1 / (1 - b2) / Math.sqrt(A)
       * (1 / (2 * R * R) - A * betaT2 / R);
     return scale(magnitude, camera.rHat);
   }
-  function flightAcceleration(fwd, right){
-    const direction = thrustDirection(fwd, right);
-    if (direction && camera.orbitLock) { camera.orbitLock = false; setMode("pilot"); }
-    if (camera.interior) {
-      // No static observer to hold against and no hover to settle to inside:
-      // pure thrust on a geodesic (W/S/A/D change E and L, interior_flight.py).
-      return direction ? scale(PILOT_THRUST, direction) : [0, 0, 0];
-    }
-    const beta = flightBeta();
-    const u = scale(1 / Math.sqrt(1 - dot3(beta, beta)), beta);
-    // Powered flight is a speed-controlled assist, rather than an undamped
-    // rocket.  This makes releasing WASD settle back to a hover.  A deliberate
-    // C circular geodesic is exempt so it remains an exact no-thrust orbit.
-    const damping = camera.orbitLock ? [0, 0, 0] : scale(-FLIGHT_DAMPING, u);
-    return add(altitudeHoldAcceleration(), add(damping,
-      direction ? scale(PILOT_THRUST, direction) : [0, 0, 0]));
+  // du/dtau in the reference frame (the static observer outside R_SWITCH,
+  // the free faller inside) of a constant proper acceleration alpha in the
+  // pilot's own frame.  The camera axes are the pure boost of the reference
+  // triad, so alpha's components on them are rest-frame components, and the
+  // spatial part of the boosted four-acceleration is alpha + (gamma - 1)
+  // (alpha . bhat) bhat = alpha + (alpha . u) u / (gamma + 1), u = gamma beta
+  // (its time part alpha . u is what renormalizing gamma from u adds).  Until
+  // 2026-11-04 the rate was alpha itself, which the pilot feels as alpha/gamma
+  // along its motion.  f64 reference: freeflight.thrust_rate.
+  function thrustRate(alpha, u){
+    const gam = Math.sqrt(1 + dot3(u, u));
+    return add(alpha, scale(dot3(alpha, u) / (gam + 1), u));
   }
-  function accelerate(h, acceleration){
-    // Add the hold and pilot accelerations to proper velocity rather than
-    // clipping beta: the camera remains subluminal at every update.
-    if (camera.interior) {
-      if (dot3(acceleration, acceleration) === 0) return;   // exact coast: E, L kept
-      const beta = lemaitreBeta();
-      const u = scale(1 / Math.sqrt(1 - dot3(beta, beta)), beta);
-      const uNext = add(u, scale(h, acceleration));
-      seedFlightLem(camera.R, scale(1 / Math.sqrt(1 + dot3(uNext, uNext)), uNext));
-      return;
-    }
-    const beta = flightBeta();
+  // One kick of proper time k (half a step, on each side of the coast).
+  // Free flight, an orbit and the interior are thrust only: with no key the
+  // kick is skipped, so a coast keeps E and L exactly.  The static observer
+  // moved by thrust adds the altitude hold and the damping as Euler kicks
+  // (the hover the viewer had for every flight until 2026-11-04).  The thrust
+  // is a midpoint kick (its rate at u advanced by k/2): Euler kicks of the
+  // boosted rate fall 1.7 % short at gamma = 30, the midpoint 5e-5.
+  function accelerate(k){
+    const direction = thrustDirection(view.fwd, view.right);
+    const hold = mode === "static" && !camera.interior;
+    if (direction && mode === "orbit") setMode("pilot", t("orbitToFly"));
+    if (!direction) camera.thrustCut = false;
+    if (!direction && !hold) return;                   // exact coast: E, L kept
+    const beta = camera.interior ? lemaitreBeta() : flightBeta();
     const u = scale(1 / Math.sqrt(1 - dot3(beta, beta)), beta);
-    const uNext = add(u, scale(h, acceleration));
+    let uNext = u;
+    if (hold)
+      uNext = add(uNext, scale(k, add(altitudeHoldAcceleration(beta), scale(-FLIGHT_DAMPING, u))));
+    if (direction) {
+      let alpha = scale(PILOT_THRUST, direction);
+      // outside, at the gamma cap: drop the part of the thrust that raises
+      // gamma (d gamma/d tau = alpha . u); steering and braking still act
+      const au = dot3(alpha, u);
+      const cut = !camera.interior && au > 0 && Math.sqrt(1 + dot3(u, u)) >= THRUST_GAMMA_MAX;
+      if (cut) alpha = sub(alpha, scale(au / dot3(u, u), u));
+      const uMid = add(u, scale(.5 * k, thrustRate(alpha, u)));
+      uNext = add(uNext, scale(k, thrustRate(alpha, uMid)));
+      // and a kick never takes |u| past the cap (or past its own start, when
+      // gravity has already raised gamma above the cap): without this a kick
+      // that crosses the cap overshoots it by up to k gamma (0.3 at x100)
+      const lim = Math.max(THRUST_GAMMA_MAX * THRUST_GAMMA_MAX - 1, dot3(u, u));
+      const clamp = !camera.interior && dot3(uNext, uNext) > lim;
+      if (clamp) uNext = scale(Math.sqrt(lim / dot3(uNext, uNext)), uNext);
+      if ((cut || clamp) && !camera.thrustCut) camera.message = t("thrustCut", THRUST_GAMMA_MAX);
+      camera.thrustCut = cut || clamp;
+    }
+    // added to the proper velocity rather than clipping beta: the camera
+    // remains subluminal at every update
     const betaNext = scale(1 / Math.sqrt(1 + dot3(uNext, uNext)), uNext);
-    seedFlight(camera.R, betaNext);
+    if (camera.interior) seedFlightLem(camera.R, betaNext);
+    else seedFlight(camera.R, betaNext);
   }
-  function flightStep(fwd, right){
+  function flightStep(){
     if (!camera.active) return;
     const now = performance.now();
     const speed = rateOf();
@@ -1943,16 +2203,32 @@ async function main(){
     while (remain > 0 && camera.active) {
       const h = Math.min(FLIGHT_STEP, remain,     // never 5% of R per step
         0.05 * camera.R / Math.max(Math.abs(camera.rd), 1e-9));   // (rd ~ R^-1/2 near 0)
-      // Symmetric half-kicks make the no-input static solution stable: the
-      // support acceleration cancels the geodesic fall without a one-step bias.
-      accelerate(.5 * h, flightAcceleration(fwd, right));
+      // Symmetric half-kicks make the no-input hover of the static observer
+      // stable: the support acceleration cancels the geodesic fall without a
+      // one-step bias.  Each kick reads the view basis itself, which the
+      // coast rotates when it crosses R_SWITCH.
+      accelerate(.5 * h);
       if (!coast(h)) break;
-      accelerate(.5 * h, flightAcceleration(fwd, right));
+      accelerate(.5 * h);
+      camera.tau += h; camera.ptau += h;
       remain -= h;
+    }
+    // the static observer moved by thrust is at rest again once the keys are
+    // up and it has settled (drawn without the integrator, as after 0)
+    if (camera.active && mode === "static" && !camera.interior
+        && !thrustDirection(view.fwd, view.right)) {
+      const b = flightBeta(), b2 = dot3(b, b);
+      if (b2 / (1 - b2) < SETTLE_U * SETTLE_U) { camera.active = false; camera.timeDebt = 0; }
     }
     setSliderFromR(camera.R);                  // echo the flight; pinned past R_max
   }
-  function startFreeFlight(){
+  // W/A/S/D from rest (free = false) and the free-flight choice (the observer
+  // control, F; free = true).  W/A/S/D move the observer on the screen: the
+  // static observer stays the static observer, moved by thrust with the
+  // altitude hold and the damping (released, it settles back to rest); every
+  // other start is free flight (thrust only, released, it coasts on a
+  // geodesic, 2026-11-04).
+  function startFreeFlight(free){
     const requestedR = camera.R;
     if (requestedR <= Rmin) {
       camera.active = false; setMode(mode, t("noFlyDeep"));
@@ -1962,31 +2238,43 @@ async function main(){
     // with the four-velocity of the camera on the screen, so the first thrust
     // frame shows the same view (the same boost) and the thrust then changes
     // it continuously.  The camera on the screen is the radial free faller
-    // (E = 1, L = 0) when the FFO box is on (also during a fall) or inside
-    // the horizon, else the static observer; draw() makes the same choice
-    // (since 2026-10-29 the box is the observer control's free-fall choice).
+    // (E = 1, L = 0) when the observer is the free-fall one or inside the
+    // horizon, else the static observer; draw() makes the same choice (the
+    // FFO box of 2026-10-20 is the observer control's free-fall choice).
     // Until 2026-10-20 the flight started at rest in the static frame, so W
     // on the initial screen (R = 50, FFO on) dropped the faller's boost
     // sqrt(1/R) = 0.14 in one frame and the picture jumped (DESIGN.md
     // "W を押した瞬間の跳び").  Outside R_SWITCH a faller's start is
-    // seedFlight with beta = sqrt(1/R) toward the hole; the hold and damping
-    // then bring it to a hover.  Below R_SWITCH the faller is the free-fall
-    // frame itself (beta = 0), and a static camera (1 < R < R_SWITCH, FFO
-    // off) moves outward at sqrt(1/R) relative to it, which seedFlightLem
-    // maps to the static E = sqrt(A), rd = 0.
+    // seedFlight with beta = sqrt(1/R) toward the hole, and released keys
+    // leave it falling on its geodesic (until 2026-11-04 the hold and the
+    // damping brought every flight to a hover).  Below R_SWITCH the faller is
+    // the free-fall frame itself (beta = 0), and a static camera (1 < R <
+    // R_SWITCH, FFO off; only __bh.set puts one there) moves outward at
+    // sqrt(1/R) relative to it, which seedFlightLem maps to the static
+    // E = sqrt(A), rd = 0; no hover exists there, so it flies free.
     const showsFaller = mode === "freefall" || requestedR <= 1.0;
     const vFall = Math.sqrt(1 / requestedR);
-    falling = false; el("fall").textContent = t("fall");
     camera.R = requestedR;
     camera.interior = requestedR < R_SWITCH;
     if (camera.interior)
       seedFlightLem(camera.R, showsFaller ? [0, 0, 0] : scale(vFall, camera.rHat));
     else seedFlight(camera.R, showsFaller ? scale(-vFall, camera.rHat) : [0, 0, 0]);
     camera.active = true; camera.lastNow = performance.now();
-    camera.timeDebt = 0; camera.orbitLock = false;
-    setMode("pilot", camera.interior
+    camera.timeDebt = 0; camera.thrustCut = false;
+    if (!free && mode === "static" && !camera.interior) setMode("static", t("hoverThrust"));
+    else setMode("pilot", camera.interior
       ? t(showsFaller ? "flyInside" : "flyInsideStatic")
       : t(showsFaller ? "flyFromFall" : "flyHere"));
+    return true;
+  }
+  // the free-flight choice (the observer control's segment and F): a camera
+  // already moving keeps its velocity (an orbit, the static observer moved
+  // by thrust, whose hold and damping stop), one at rest starts from the
+  // four-velocity on the screen
+  function toFreeFlight(){
+    if (mode === "pilot") return true;
+    if (!camera.active) return startFreeFlight(true);
+    setMode("pilot", t(mode === "orbit" ? "orbitToFly" : "staticToFly"));
     return true;
   }
   function circularize(right){
@@ -1999,10 +2287,11 @@ async function main(){
     if (norm(tHat) < 1e-8) tHat = sub([1, 0, 0], scale(camera.rHat[0], camera.rHat));
     tHat = unit(tHat);
     const beta = Math.sqrt(1 / (2 * camera.R * (1 - 1 / camera.R)));
+    // the orbit is a geodesic: nothing but thrust acts on it, and the first
+    // thrust makes it a free flight (accelerate)
     seedFlight(camera.R, scale(beta, tHat));
     camera.active = true; camera.lastNow = performance.now();
-    camera.timeDebt = 0; camera.orbitLock = true;
-    falling = false; el("fall").textContent = t("fall");   // an orbit ends a fall
+    camera.timeDebt = 0; camera.interior = false; camera.thrustCut = false;
     setMode("orbit", t("orbitOn"));
   }
   function orbitAt(R){
@@ -2011,7 +2300,7 @@ async function main(){
     const tHat = unit(cross(camera.hHat, camera.rHat));
     camera.interior = false;
     seedFlight(R, scale(Math.sqrt(1 / (2 * (R - 1))), tHat));
-    camera.active = true; camera.orbitLock = true;
+    camera.active = true;
     camera.timeDebt = 0; camera.lastNow = performance.now();
   }
   function hover(){
@@ -2022,9 +2311,9 @@ async function main(){
         // change along the worldline), the state of longest remaining proper
         // time (interior_flight.py); beta = sqrt(R) outward relative to the
         // free-fall frame gives exactly E = 0
-        falling = false; el("fall").textContent = t("fall"); keys.clear();
+        keys.clear();
         camera.interior = true; camera.active = true; camera.lastNow = performance.now();
-        camera.timeDebt = 0; camera.orbitLock = false;
+        camera.timeDebt = 0; camera.thrustCut = false;
         seedFlightLem(requestedR, scale(Math.sqrt(requestedR), camera.rHat));
         setMode("pilot", t("restInside"));
         return true;
@@ -2032,11 +2321,11 @@ async function main(){
       camera.message = t("noHover");
       return false;
     }
-    // the static observer, drawn at rest (the hover a released flight
-    // settles to; the same picture without the integrator)
-    falling = false; keys.clear(); camera.R = requestedR;
-    camera.active = false; camera.interior = false; camera.orbitLock = false;
-    el("fall").textContent = t("fall");
+    // the static observer, drawn at rest: an explicit change of observer, so
+    // a moving camera's velocity is replaced (the view changes by the
+    // aberration, as with the observer control; DESIGN.md "UI の作り直し")
+    keys.clear(); camera.R = requestedR;
+    camera.active = false; camera.interior = false;
     setMode("static", t("hovering"));
     return true;
   }
@@ -2048,62 +2337,48 @@ async function main(){
       setMode(mode, t("noStaticHere"));          // the control goes back
       return false;
     }
-    falling = false; el("fall").textContent = t("fall");
-    camera.active = false; camera.interior = false; camera.orbitLock = false; keys.clear();
+    camera.active = false; camera.interior = false; keys.clear();
     setMode(m, t(m === "static" ? "obsToStatic" : "obsToFall"));
     return true;
   }
 
   // ---- real-time free fall: r(tau) = (R0^{3/2} - (3/2) tau)^{2/3}
-  // (memo FFO section; same closed form as render_fall_movie.py)
-  let falling = false, fallR32 = 0, fallTau = 0, fallLast = 0, fallV0 = 0, fallR0 = 1;
-  function startFall(){
-    const R = camera.R;                        // fall from where the camera is
-    camera.active = false; camera.interior = false; camera.orbitLock = false; keys.clear();
-    fallR32 = Math.pow(R, 1.5);
-    fallTau = 0; fallLast = performance.now();
-    fallV0 = camera.v; fallR0 = R;             // v(r) is a closed form along the fall
-    falling = true;
-    setMode("freefall");                       // a fall is the free-fall observer
-    el("fall").textContent = t("stop");
-  }
-  el("fall").addEventListener("click", () => {
-    if (falling) { falling = false; el("fall").textContent = t("fall"); return; }
-    camera.message = "";
-    startFall();
-  });
+  // (memo FFO section; same closed form as render_fall_movie.py).  The free
+  // faller falls whenever time runs (2026-11-04).  Each frame advances the
+  // closed form from the camera's event, R^{3/2} -> R^{3/2} - (3/2) dtau, and
+  // the clock by v_fall(R_new) - v_fall(R_old), so wherever R is written (the
+  // slider, __bh.set, a change of observer) the fall goes on from there with
+  // the clock kept, the same rule as the slider's for every observer (the
+  // faller that passes the new R now).  Until 2026-11-04 the fall kept its
+  // start (R0, v0, tau) and had to be restarted at every such write.  A
+  // frame adds at most 0.1 s of wall time (a tab pause is not a teleport).
+  let fallLast = performance.now();
   function fallStep(){
-    const spd = rateOf();
-    if (!falling) return;
-    // proper time accumulates frame by frame at the current rate (a slider
-    // change mid-fall is not a teleport; a tab pause adds at most 0.1 s of
-    // wall time)
     const now = performance.now();
-    fallTau += Math.min((now - fallLast) / 1000, 0.1) * spd;
+    const dtau = Math.min(Math.max((now - fallLast) / 1000, 0), 0.1) * rateOf();
     fallLast = now;
-    const R32 = fallR32 - 1.5 * fallTau;
-    const R = Math.pow(Math.max(R32, 0), 2 / 3);
-    if (R <= Rmin) {
-      falling = false;
-      el("fall").textContent = t("fall");
-      el("R").value = 0;
-      camera.R = Rmin;
-      return;
-    }
-    setSliderFromR(R);
+    if (!(dtau > 0)) return;
+    const R0 = camera.R;
+    const R = Math.max(Math.pow(Math.max(Math.pow(R0, 1.5) - 1.5 * dtau, 0), 2 / 3), Rmin);
+    camera.v += BHShips.vFallRaw(R) - BHShips.vFallRaw(R0);
+    camera.ptau += (Math.pow(R0, 1.5) - Math.pow(R, 1.5)) / 1.5;
     camera.R = R;
-    camera.v = fallV0 + BHShips.vFallRaw(R) - BHShips.vFallRaw(fallR0);
+    setSliderFromR(R);
+    // the interior table's last row: nothing further in can be drawn, so
+    // time stops at this event (it used to stop the fall and keep the clock
+    // running at a standing R)
+    if (R <= Rmin) setPaused(true, t("fallEnd"));
   }
-  // At rest (the slider's camera, outside the horizon the static observer
-  // or, with the FFO box on, the faller it shows; inside, the faller) the
-  // clock still runs at the chosen rate, so the ships move past a camera
-  // that stands still
+  // The static observer's clock (and that of a pilot left at rest, which no
+  // control makes now) runs at the chosen rate, so the ships move past a
+  // camera that stands still
   let clockLast = performance.now();
   function staticClock(){
     const now = performance.now();
     const dt = Math.min(Math.max((now - clockLast) / 1000, 0), 0.1) * rateOf();
     const R = camera.R;
     camera.v += dt * ((R > 1 && mode !== "freefall") ? BHShips.dvdtauRest(R) : BHShips.dvdtauFall(R));
+    camera.ptau += dt;
   }
 
   // The slider always moves the camera (user 2026-10-13: while flying or
@@ -2116,7 +2391,8 @@ async function main(){
   // R_ORBIT_MIN; at a floor the line under the slider offers the observer
   // that goes further.  A pilot (free flight) is first stopped in its own
   // reference frame: the static observer outside R_SWITCH, the free faller
-  // inside it (no hover there).  Until 2026-10-29 a flight was re-seeded as a
+  // inside it (no hover there); the static observer moved by thrust is at
+  // rest at the new R.  Until 2026-10-29 a flight was re-seeded as a
   // hover, ended below R_SWITCH into the static camera, and that camera was
   // replaced by the free faller at R = 1.
   el("R").addEventListener("input", () => {
@@ -2125,7 +2401,7 @@ async function main(){
     let msg = "";
     if (mode === "pilot") {
       const inside = camera.interior;
-      camera.active = false; camera.interior = false; camera.orbitLock = false; camera.timeDebt = 0;
+      camera.active = false; camera.interior = false; camera.timeDebt = 0;
       setMode(inside ? "freefall" : "static");
       msg = t(inside ? "sliderToFall" : "sliderToStatic");
     }
@@ -2138,33 +2414,43 @@ async function main(){
     camera.message = msg;
     if (mode === "static") {
       const Rs = Math.max(R, R_STATIC_MIN);
+      camera.active = false; camera.timeDebt = 0;
       camera.R = Rs;
       if (R < R_STATIC_MIN) { setSliderFromR(Rs); showFloor("static"); } else showFloor(null);
       return;
     }
     showFloor(null);
-    if (falling) { fallR32 = Math.pow(R, 1.5); fallTau = 0; fallLast = performance.now(); fallV0 = camera.v; fallR0 = R; }
-    camera.R = R;
+    camera.R = R;          // a free faller falls on from here (fallStep), the clock kept
   });
+  // a pointer on the slider holds time until it is released (scrubbing)
+  el("R").addEventListener("pointerdown", () => { scrubbing = true; });
+  for (const ev of ["pointerup", "pointercancel"])
+    window.addEventListener(ev, () => { scrubbing = false; });
+  el("R").addEventListener("change", () => { scrubbing = false; });
   // The observer control: choosing a segment is the explicit change of
   // observer (static or free fall at the camera's R, an orbit at R, a
   // flight that starts from the shown camera's four-velocity; from an orbit
-  // the flight keeps the orbit's velocity).  A refused choice puts the
-  // control back.
+  // or the static observer moved by thrust the flight keeps the velocity).
+  // A refused choice puts the control back.  A choice resumes time (the free
+  // faller then falls at once: choosing it is what makes it fall).
   for (const [m, id] of Object.entries(MODE_INPUT))
     el(id).addEventListener("change", () => {
       if (!el(id).checked || m === mode) return;
       let ok;
       if (m === "orbit") { circularize(viewBasis().right); ok = mode === "orbit"; }
       else if (m === "pilot") {
-        if (camera.active) { camera.orbitLock = false; setMode("pilot", t("orbitToFly")); ok = true; }
-        else ok = startFreeFlight();
+        ok = toFreeFlight();
         if (ok && matchMedia("(hover: none) and (pointer: coarse)").matches) camera.message = t("pilotTouch");
       }
       else ok = chooseObserver(m);
       if (!ok) setMode(mode);
+      else if (paused) { const msg = camera.message; resumeTime(); camera.message = msg; }
     });
-  el("floorgo").addEventListener("click", () => { if (floorTo) chooseObserver(floorTo); });
+  el("floorgo").addEventListener("click", () => {
+    if (floorTo && chooseObserver(floorTo) && paused) { const msg = camera.message; resumeTime(); camera.message = msg; }
+  });
+  el("play").addEventListener("click", () => { togglePause(); canvas.focus(); });
+  showPlay();
   const ARROW_KEYS = new Set(["arrowup", "arrowdown", "arrowleft", "arrowright"]);
   // A key tap can begin and end between animation frames.  Record it so that
   // such a tap always makes one small, deterministic turn rather than being
@@ -2172,10 +2458,13 @@ async function main(){
   const arrowPresses = new Map();
   // The keys act anywhere on the page, except that a focused form control
   // keeps the keys it uses itself (arrows move a slider or the observer
-  // segments, a select takes its type-ahead), so the whole page works from
-  // the keyboard: Tab to a control, Esc back to the view (and out of the
-  // photo view or the hidden UI).  While the card "how to fly" is open it
-  // handles its own keys (Esc closes it).
+  // segments, a select takes its type-ahead, Space presses a button or
+  // ticks a box), so the whole page works from the keyboard: Tab to a
+  // control, Esc back to the view (and out of the photo view, the hidden UI
+  // or the first-visit note).  While the card "how to fly" is open it
+  // handles its own keys (Esc closes it).  Space pauses and resumes time;
+  // 0, C, F (a choice of observer) and W/A/S/D resume it.
+  const SPACE_OWNERS = new Set(["BUTTON", "SELECT", "TEXTAREA", "SUMMARY", "A"]);
   window.addEventListener("keydown", e => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if ($("help").open) return;
@@ -2183,18 +2472,27 @@ async function main(){
     if (key === "escape") {
       if (photo) setPhoto(0);
       else if (uiOff) toggleUI();
+      else closeCoach();
       canvas.focus();
       return;
     }
     const tag = e.target.tagName;
+    if (key === " ") {
+      if (SPACE_OWNERS.has(tag) || (tag === "INPUT" && e.target.type === "checkbox")) return;
+      e.preventDefault();
+      if (!e.repeat) togglePause();
+      return;
+    }
     if (tag === "SELECT" || tag === "TEXTAREA") return;
     if (ARROW_KEYS.has(key) && tag === "INPUT") return;
     if (key === "h") { e.preventDefault(); toggleUI(); return; }
     if (key === "p") { e.preventDefault(); setPhoto((photo + 1) % 3); return; }
     if (key === "?") { e.preventDefault(); openHelp(); return; }
-    if (key === "0") { e.preventDefault(); hover(); return; }
+    if (key === "0") { e.preventDefault(); resumeTime(); hover(); return; }
+    if (key === "f") { e.preventDefault(); resumeTime(); toFreeFlight(); return; }   // = the free-flight segment
     if (key === "c") {
       e.preventDefault();
+      resumeTime();
       circularize(viewBasis().right);
       return;
     }
@@ -2210,7 +2508,8 @@ async function main(){
     }
     if (["w", "a", "s", "d"].includes(key)) {
       e.preventDefault();
-      if (!camera.active && !startFreeFlight()) return;
+      resumeTime();                    // thrust acts only while time runs
+      if (!camera.active && !startFreeFlight(false)) return;
       keys.add(key);
     }
   });
@@ -2269,6 +2568,7 @@ async function main(){
   }
   function clearControls(){
     keys.clear(); arrowPresses.clear(); resetLookMotion();
+    scrubbing = false;             // a pointer released outside the window
   }
 
   function keyboardLook(){
@@ -2458,6 +2758,9 @@ async function main(){
       return { cases, results };
     },
     set(o){
+      // paused: a machine pin of the time state (no message; a check that
+      // wants the user's toggle presses Space or the title bar's button)
+      if (o.paused !== undefined && !!o.paused !== paused) setPaused(!!o.paused);
       if (o.v !== undefined) camera.v = o.v;
       if (o.ships !== undefined) el("ships").checked = o.ships;
       if (o.diskAtabR !== undefined) diskKnobs.diskAtabR = o.diskAtabR;
@@ -2492,7 +2795,9 @@ async function main(){
     },
     state(){ return { Rslider: el("R").value, R: camera.R, rHat: [...camera.rHat], v: camera.v, ships: el("ships").checked,
                       hHat: [...camera.hHat], E: camera.E, L: camera.L, rd: camera.rd,
-                      active: camera.active, interior: camera.interior,
+                      active: camera.active, interior: camera.interior, paused, ptau: camera.ptau,
+                      tau: camera.tau, thrustCut: camera.thrustCut, lastSwitch: camera.lastSwitch,
+                      message: camera.message,
                       yaw, pitch,
                       fov: el("fov").value, ffo: mode === "freefall", observer: mode,
                       dop: el("dop").checked, eternal: el("eternal").checked,
@@ -2553,7 +2858,38 @@ async function main(){
   const setHidden = (id, h) => { const e = el(id); if (e.hidden !== h) e.hidden = h; };
   const fmtR = R => R < 0.1 ? R.toPrecision(2) : R < 1e4 ? R.toFixed(2) : R.toExponential(3);
   const fmtTau = x => x < 0.1 ? x.toPrecision(2) : x < 1e4 ? x.toFixed(2) : x.toExponential(3);
-  const TAU_KEYS = { horizon: "tauHor", horizonIf: "tauHorIf", sing: "tauSing", singCoast: "tauSingCoast" };
+  const TAU_KEYS = { horizon: "tauHor", drop: "tauDrop", coastHor: "tauCoastHor",
+                     sing: "tauSing", singCoast: "tauSingCoast" };
+  // Proper time to the horizon of the static observer at R if it let go (a
+  // radial geodesic from rest, E = sqrt(1 - 1/R)): r = (R/2)(1 + cos eta),
+  // tau = (R^{3/2}/2)(eta + sin eta), the horizon at cos eta = 2/R - 1
+  // (r_S = 1; MTW §25.5 with 2M = 1).  Until 2026-11-04 the HUD showed the
+  // E = 1 faller's 2/3 (R^{3/2} - 1) for it ("落ちれば"), 14 times too short
+  // at R = 1.02 (0.020 against 0.288 r_S/c).  check_time.py compares it with
+  // the radial geodesic ODE from rest integrated to r = 1.
+  function tauDropFromRest(R){
+    const eta = Math.acos(clamp(2 / R - 1, -1, 1));
+    return Math.pow(R, 1.5) / 2 * (eta + Math.sin(eta));
+  }
+  // Proper time to the horizon of a pilot outside that coasts on its
+  // geodesic (E, L) from R with rd < 0, or null when it moves out or turns
+  // back before the horizon: tau = int_1^R dr / sqrt(E^2 - (1 - 1/r)(1 +
+  // L^2/r^2)), with r = R - (R - 1) s^2 (regular at r = R, where the root is
+  // |rd|), midpoint rule (n = 1000: its end correction h^2/24 [g'] is 2e-4
+  // r_S/c at R = 50, below the HUD's 0.01).  For E = 1, L = 0 it is the
+  // faller's 2/3 (R^{3/2} - 1).  f64 check: check_time.py, against the
+  // geodesic ODE (freeflight._rhs) integrated to r = 1.
+  function tauCoastToHorizon(R, E, L, rd, n = 1000){
+    if (!(rd < 0) || R <= 1) return null;
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+      const s = (i + .5) / n, r = R - (R - 1) * s * s;
+      const f = E * E - (1 - 1 / r) * (1 + L * L / (r * r));
+      if (!(f > 0)) return null;                  // a turning point before the horizon
+      sum += 2 * (R - 1) * s / Math.sqrt(f);
+    }
+    return sum / n;
+  }
   let msgSet = "", msgAt = 0;
   function refreshUI(R, betaVec){
     const now = performance.now();
@@ -2562,47 +2898,62 @@ async function main(){
     setText("fovval", fov.toFixed(0));
     setText("incval", el("inc").value);
     setHidden("incrow", !el("disk").checked);
-    setText("fall", t(falling ? "stop" : "fall"));
-    // the observer control: what can be chosen here, and what the choice is
+    // the observer control: what can be chosen here, and what the choice is;
+    // why a segment is off goes on its own line under the description
     const offS = mode !== "static" && R < R_STATIC_MIN, offO = mode !== "orbit" && R <= 3.0;
     if (el("mStatic").disabled !== offS) el("mStatic").disabled = offS;
     if (el("mOrbit").disabled !== offO) el("mOrbit").disabled = offO;
     const offP = mode !== "pilot" && R <= Rmin;
     if (el("mPilot").disabled !== offP) el("mPilot").disabled = offP;
-    setText("modehint", t(DESC_KEYS[mode]) + (offS ? " " + t("offStatic") : "")
-      + (offO ? " " + t("offOrbit") : ""));
-    // the HUD
+    setText("modehint", t(DESC_KEYS[mode]));
+    const off = [offS ? t("offStatic") : "", offO ? t("offOrbit") : ""].filter(Boolean).join(" ");
+    setHidden("modeoff", !off);
+    if (off) setText("modeoff", off);
+    // the HUD: the observer by the segment's name (and E = 1 for the free
+    // faller), whether time is paused, and only the observer's own numbers
     const inside = R < 1.0, rsSec = RS_SEC[el("mass").value];
-    setText("hObs", t(MODE_NAME[mode]) + (falling ? " · " + t("falling") : "")
+    const moved = camera.active && mode === "static";       // the static observer moved by thrust
+    setText("hObs", t(MODE_NAME[mode])
+      + (moved ? " · " + t(thrustDirection(view.fwd, view.right) ? "hoverMoving" : "hoverSettling") : "")
       + ((!camera.active && mode !== "freefall" && R <= 1.0) ? " · " + t("noStatic") : ""));
+    setHidden("hPaused", !paused);
+    if (paused) setText("hPaused", t("paused"));
     setText("hRk", t(inside ? "hudPosIn" : "hudPos"));
     setText("hR", fmtR(R));
     setHidden("hIn", !inside);
     if (inside) setText("hIn", t("inside"));
-    // proper time: outside, to the horizon on the E = 1 fall from here (the
-    // free faller's own; "if it fell" for the others); inside, to the
-    // singularity (the free faller's, or a pilot's coasting on its E and L)
+    // proper time, only where the observer's own worldline reaches the
+    // horizon or the singularity: the free faller's (closed form); the
+    // static observer's if it let go (from rest); a pilot's if it coasted
+    // on its E and L from now; none for an orbit (it never falls) or for the
+    // static observer moved by thrust (released, it stops)
     let tauK = null, tau = 0;
     if (inside) {
       if (camera.active) { tauK = TAU_KEYS.singCoast; tau = tauToSingularity(R, camera.E, camera.L); }
       else { tauK = TAU_KEYS.sing; tau = 2 / 3 * Math.pow(R, 1.5); }
     } else if (R > 1.0) {
-      tauK = mode === "freefall" ? TAU_KEYS.horizon : TAU_KEYS.horizonIf;
-      tau = 2 / 3 * (Math.pow(R, 1.5) - 1);
+      if (mode === "freefall" && !camera.active) { tauK = TAU_KEYS.horizon; tau = 2 / 3 * (Math.pow(R, 1.5) - 1); }
+      else if (mode === "static" && !camera.active) { tauK = TAU_KEYS.drop; tau = tauDropFromRest(R); }
+      else if (mode === "pilot") {
+        const c = tauCoastToHorizon(R, camera.E, camera.L, camera.rd);
+        if (c !== null) { tauK = TAU_KEYS.coastHor; tau = c; }
+      }
     }
     setHidden("cTau", tauK === null);
     if (tauK) {
-      setText("hTauK", t(tauK)); setText("hTau", fmtTau(tau) + " rS/c"); setText("hTauS", fmtSec(tau * rsSec));
+      setText("hTauK", t(tauK)); setText("hTau", fmtTau(tau)); setText("hTauS", fmtSec(tau * rsSec));
     }
     // speed: against the static frame outside, against the free-fall frame
-    // for a pilot below R_SWITCH; inside, the free faller has no static frame
-    const noBeta = !camera.active && inside;
+    // for a pilot below R_SWITCH; none inside for the free faller (it is the
+    // reference there) nor for the static observer at rest (always 0)
+    const noBeta = (!camera.active && inside) || (!camera.active && mode === "static");
     setHidden("cBeta", noBeta);
     if (!noBeta) {
       setText("hBetaK", t(camera.active && camera.interior ? "betaFall" : "betaStatic"));
       const b = norm(betaVec);
       setText("hBeta", b.toFixed(3) + " c");
-      setText("hGam", b > 0.866 ? "γ = " + (1 / Math.sqrt(Math.max(1 - b * b, 1e-12))).toFixed(2) : "");   // γ >= 2
+      setText("hGam", (b > 0.866 ? "γ = " + (1 / Math.sqrt(Math.max(1 - b * b, 1e-12))).toFixed(2) : "")   // γ >= 2
+        + (camera.thrustCut ? " " + t("gammaCap") : ""));
     }
     setHidden("cE", !camera.active); setHidden("cL", !camera.active);
     if (camera.active) { setText("hE", camera.E.toFixed(4)); setText("hL", camera.L.toFixed(4)); }
@@ -2630,12 +2981,17 @@ async function main(){
     if (once !== true) keyboardLook();
     fov = parseFloat(el("fov").value);
     const basis = viewBasis();
-    // a verification draw (once) pins the scene: it never advances time
+    // a verification draw (once) pins the scene: it never advances time.
+    // Time advances only while it runs and no pointer holds the R slider;
+    // otherwise every clock's last frame time follows now, so resuming
+    // never catches up the paused wall time.
     if (once !== true) {
-      if (camera.active) flightStep(basis.fwd, basis.right);
-      else fallStep();
-      if (!camera.active && !falling) staticClock();
-      clockLast = performance.now();
+      const now = performance.now();
+      if (paused || scrubbing) { camera.lastNow = now; camera.timeDebt = 0; fallLast = now; }
+      else if (camera.active) flightStep();
+      else if (mode === "freefall") fallStep();
+      else staticClock();
+      clockLast = now;
     }
     const R = camera.R;
 
@@ -2668,6 +3024,7 @@ async function main(){
     updateShips(betaVec, inc);
     uploadShips(Math.tan(fov * Math.PI / 360) * 2 / h);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (once !== true) placeShipTag(basis, w / h, Math.tan(fov * Math.PI / 360));
 
     frames++;
     const now = performance.now();
