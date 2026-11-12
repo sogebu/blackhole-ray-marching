@@ -852,36 +852,64 @@ vec4 encodePsi(float psi, bool dark){
   return vec4(r, g, x - g * 256.0, 255.0) / 255.0;
 }
 
-// interior engine: binary-search the non-uniform r grid, then same-fate
-// bilinear over the 4 surrounding nodes (no blending across the belt edges,
-// same contract as render_interior.paint)
-vec3 intLookup(float R, float chi){
+// Classify the continuous photon invariants separately from the sky
+// interpolation (interior_table.lookup). Never blend across different fates.
+vec3 intRowValue(int row, int j, float wc, float wanted) {
+  int last = int(uIntNChi) - 1;
+  vec4 a = texelFetch(uIntTab, ivec2(j, row), 0);
+  vec4 b = texelFetch(uIntTab, ivec2(j+1, row), 0);
+  if (a.z == wanted && b.z == wanted) return vec3(mix(a.xy, b.xy, wc), 1.0);
+  if (a.z == wanted) return vec3(a.xy, 1.0);
+  if (b.z == wanted) return vec3(b.xy, 1.0);
+  // The desired cap can be absent on one bracketing radial row (sky III
+  // above the horizon). Otherwise clamp to that cap's nearest valid node.
+  int endpoint = wanted == 1.0 ? last : 0;
+  vec4 e = texelFetch(uIntTab, ivec2(endpoint, row), 0);
+  if (e.z != wanted) return vec3(0.0);
+  int low = 0, high = last;
+  for (int k=0; k<10; ++k) {
+    if (high-low <= 1) break;
+    int mid = (low+high)/2;
+    float code = texelFetch(uIntTab, ivec2(mid,row),0).z;
+    if ((wanted == 1.0 && code == wanted) ||
+        (wanted == 3.0 && code != wanted)) high=mid;
+    else low=mid;
+  }
+  int edge = wanted == 1.0 ? high : low;
+  return vec3(texelFetch(uIntTab,ivec2(edge,row),0).xy,1.0);
+}
+vec3 intLookup(float R, float c, float sn){
+  // Use the transverse ray component: acos(c) rounds small caps to zero.
+  float chi = atan(sn, c), sqR = sqrt(R);
+  // Rationalize sqrt(R)-cos(chi) near the horizon and radial direction.
+  float E = c > 0.0
+    ? ((R-1.0)/(sqR+1.0) + sn*sn/(1.0+c))/sqR
+    : (sqR-c)/sqR;
+  float L = R*sn;
+  float wanted = 0.0;
+  if (L < uBcr*abs(E)) {
+    if (E > 0.0 && c < min(sqR,1.0/sqR)) wanted=1.0;
+    else if (R < 1.0 && E < 0.0) wanted=3.0;
+  }
+  if (wanted == 0.0) return vec3(0.0);
   int nR = int(uIntNR);
-  int lo = 0, hi = nR - 1;
-  for (int it = 0; it < 9; ++it) {
-    if (hi - lo <= 1) break;
-    int mid = (lo + hi) / 2;
-    float rm = texelFetch(uIntR, ivec2(mid, 0), 0).r;
-    if (rm <= R) lo = mid; else hi = mid;
+  int lo=0, hi=nR-1;
+  for (int it=0; it<9; ++it) {
+    if (hi-lo <= 1) break;
+    int mid=(lo+hi)/2;
+    float rm=texelFetch(uIntR,ivec2(mid,0),0).r;
+    if (rm <= R) lo=mid; else hi=mid;
   }
-  float r0 = texelFetch(uIntR, ivec2(lo, 0), 0).r;
-  float r1 = texelFetch(uIntR, ivec2(hi, 0), 0).r;
-  float wr = clamp((R - r0) / max(r1 - r0, 1e-9), 0.0, 1.0);
-  float uc = clamp(chi / PI * (uIntNChi - 1.0), 0.0, uIntNChi - 1.0001);
-  int j = int(floor(uc));
-  float wc = uc - float(j);
-  vec4 p00 = texelFetch(uIntTab, ivec2(j,     lo), 0);
-  vec4 p01 = texelFetch(uIntTab, ivec2(j + 1, lo), 0);
-  vec4 p10 = texelFetch(uIntTab, ivec2(j,     hi), 0);
-  vec4 p11 = texelFetch(uIntTab, ivec2(j + 1, hi), 0);
-  bool same = (p00.z == p01.z) && (p00.z == p10.z) && (p00.z == p11.z);
-  if (same) {
-    vec4 v = mix(mix(p00, p01, wc), mix(p10, p11, wc), wr);
-    return vec3(v.x, v.y, p00.z);
-  }
-  // nearest node across a fate boundary
-  vec4 v = (wr < 0.5) ? ((wc < 0.5) ? p00 : p01) : ((wc < 0.5) ? p10 : p11);
-  return vec3(v.x, v.y, v.z);
+  float r0=texelFetch(uIntR,ivec2(lo,0),0).r;
+  float r1=texelFetch(uIntR,ivec2(hi,0),0).r;
+  float wr=clamp((R-r0)/max(r1-r0,1e-9),0.0,1.0);
+  float uc=clamp(chi/PI*(uIntNChi-1.0),0.0,uIntNChi-1.0001);
+  int j=int(floor(uc)); float wc=uc-float(j);
+  vec3 a=intRowValue(lo,j,wc,wanted);
+  vec3 b=intRowValue(hi,j,wc,wanted);
+  float wa=(1.0-wr)*a.z, wb=wr*b.z;
+  float psi=(wa*a.x+wb*b.x)/max(wa+wb,1e-20);
+  return vec3(psi,1.0/abs(E),wanted);
 }
 
 // ---- chromatic Doppler: Nakayama-Oda PTEP 2017 Sec. 5.4 (per-channel
@@ -1305,8 +1333,7 @@ void main(){
         p = (pl > 1e-6) ? p / pl : vec3(1.0, 0.0, 0.0);
       }
     }
-    float chi = acos(cCam);
-    vec3 v = intLookup(uR, chi);
+    vec3 v = intLookup(uR, cCam, pl);
     psi = v.x; g = v.y * gBoost; fate = int(v.z + 0.5);
     // DEFAULT = collapse-formed hole: the far universe / white-hole light
     // do not exist — the star's image has redshifted away (BH_shooter
@@ -1318,9 +1345,8 @@ void main(){
     // traced rays move outward.  b = R sin(chi_F)/E_u with E_u = 1 -
     // cos(chi_F)/sqrt(R) the conserved energy of the unit-frequency photon;
     // g_inf = gBoost/E_u.  phi_1 and m_z come from the transverse direction p
-    // exactly as outside (a radial boost leaves it alone).  The table's fate
-    // is quantized on a 0.25 deg grid; this test is exact, so a hit wins even
-    // on a node the table calls dark.
+    // exactly as outside (a radial boost leaves it alone). The sky uses
+    // the same continuous fate test, independently of the angular grid.
     if ((uDisk || uDiskProbe > 0) && !uProbe && uR > uDiskRmin) {
       float sqR = sqrt(uR);
       float Eu = (sqR - cCam) / sqR;
