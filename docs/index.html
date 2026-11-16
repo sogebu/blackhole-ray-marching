@@ -1706,11 +1706,12 @@ async function main(){
   const unit = a => scale(1 / Math.max(norm(a), 1e-14), a);
   const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
   // Free flight has no inner limit (2026-10-13).  Below R_SWITCH (the psi
-  // table's last row, meta.R_min = 1.02) the pilot is described by its
-  // velocity relative to the radial free-fall observer (E = 1, L = 0), the
-  // frame of the interior table, instead of the local static observer, which
-  // does not exist at or inside the horizon; the view basis is rotated once
-  // at the switch so the physical camera frame is continuous (f64 reference
+  // table's last row, meta.R_min = 1.02) the pilot's state is its velocity
+  // as seen by the observer who drops straight in from rest at infinity
+  // (E = 1, L = 0), the frame the interior table uses, rather than as seen
+  // by the local static observer, which does not exist at or inside the
+  // horizon; the view basis is rotated once at the switch so the physical
+  // camera frame is continuous (f64 reference
   // and formulas: renderer/interior_flight.py).  The flight ends at the
   // interior table's last row Rmin, where the fall ends too.  Until
   // 2026-10-13 the limit was the photon sphere (1.52, DESIGN.md "scope 境界
@@ -1723,8 +1724,8 @@ async function main(){
   const R_SWITCH = 1.02;
   const FLIGHT_STEP = 0.02, FLIGHT_FRAME_BUDGET = 0.04;
   // Pilot thrust (proper acceleration in c^2/r_S) and speed damping (per r_S/c
-  // of proper time).  Thrust is a constant proper acceleration in the pilot's
-  // own frame (2026-11-04, DESIGN.md "自由飛行で離したら慣性で進む"): from rest,
+  // of proper time).  Thrust holds fixed the acceleration the pilot
+  // measures in its rest frame (2026-11-04, DESIGN.md "自由飛行で離したら慣性で進む"): from rest,
   // beta 0.9 takes 1.47 r_S/c (62 s at x1 for Sgr A*).  Free flight is thrust
   // only, so a released key coasts on a geodesic.  The altitude hold and the
   // damping act only on the static observer moved by thrust: its top speed is
@@ -2157,8 +2158,9 @@ async function main(){
   }
   // du/dtau in the reference frame (the static observer outside R_SWITCH,
   // the free faller inside) of a constant proper acceleration alpha in the
-  // pilot's own frame.  The camera axes are the pure boost of the reference
-  // triad, so alpha's components on them are rest-frame components, and the
+  // pilot's own frame.  The camera axes come from the reference triad by a
+  // boost with no rotation, so alpha's components on them are rest-frame
+  // components, and the
   // spatial part of the boosted four-acceleration is alpha + (gamma - 1)
   // (alpha . bhat) bhat = alpha + (alpha . u) u / (gamma + 1), u = gamma beta
   // (its time part alpha . u is what renormalizing gamma from u adds).  Until
