@@ -99,6 +99,7 @@
   /* the observer: native radios (arrow keys move the choice) drawn as segments */
   .seg { display: grid; grid-template-columns: repeat(4, 1fr); gap: 3px; padding: 3px;
          background: rgba(0, 0, 0, .35); border: 1px solid var(--line); border-radius: 10px; }
+  .seg.two { grid-template-columns: repeat(2, 1fr); }
   .seg input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
   .seg label { display: flex; align-items: center; justify-content: center; min-height: var(--ctl); padding: 0 .2rem;
                border-radius: 7px; font-size: .88rem; font-weight: 600; line-height: 1.15; text-align: center;
@@ -303,6 +304,12 @@
       <div id="incrow" hidden>
         <div class="row"><label class="lbl" for="inc" data-t="inc">円盤の傾き</label> <output id="incval" for="inc"></output>&deg;</div>
         <input id="inc" type="range" min="0" max="89" step="1" value="80">
+        <div class="row"><span class="lbl" id="expolbl" data-t="expo">露出</span></div>
+        <div class="seg two" role="radiogroup" aria-labelledby="expolbl">
+          <input type="radio" name="expo" id="eSky" value="sky" checked><label for="eSky" data-t="eSky">空に合わせる</label>
+          <input type="radio" name="expo" id="eDisk" value="disk"><label for="eDisk" data-t="eDisk">円盤に合わせる</label>
+        </div>
+        <p id="disknote" class="hint"></p>
       </div>
     </fieldset>
     <details id="more">
@@ -322,7 +329,7 @@
             <option value="SgrA" selected>Sgr A*</option>
             <option value="M87">M87*</option>
           </select>
-          <p class="hint" data-t="massnote">時間を秒に換算するためだけ。絵は変わらない。</p></div>
+          <p class="hint" data-t="massnote">時間の秒への換算と、降着円盤の温度が変わる (いちばん熱い所: 太陽 460 万度、Sgr A* 10 万度、M87* 1.6 万度)。</p></div>
         <div><label class="check"><input id="eternal" type="checkbox"> <span data-t="eternal">永久ブラックホール</span></label>
           <p class="hint" data-t="eternalnote">向こう側の宇宙まで見える理想化。崩壊でできた現実の穴は OFF。</p></div>
         <label class="check" hidden><input id="dop" type="checkbox"> <span data-t="dop">ドップラー効果</span> <span class="hint" data-t="dopnote">(色 + 明るさ g&#8308;)</span></label>
@@ -464,6 +471,11 @@ const I18N = {
     uiOffHint: "H で表示を戻す",
     photoHint1: "撮影向けの表示: P で計器も消す · Esc で戻る",
     photoHint2: "撮影向けの表示 (計器なし): P か Esc で戻る",
+    diskTsun: "いちばん熱い所は 460 万度 (質量が大きいほど低い)。",
+    diskTsgra: "Sgr A* には薄い円盤は無い。仮想的な円盤で、いちばん熱い所を 10 万度にしている。",
+    diskTm87: "いちばん熱い所は 1.6 万度 (質量が大きいほど低い)。",
+    expoSkyNote: "空に合わせると、円盤は明るすぎて白く飛ぶ。",
+    expoDiskNote: "円盤に合わせると、空は暗すぎて真っ黒。",
   },
   en: {
     canvasLabel: "View near the black hole. Drag or use the arrow keys to look around",
@@ -486,7 +498,9 @@ const I18N = {
       "rotation (l = 90&deg;); the Galactic center is 90&deg; to the right.",
     mass: "Mass",
     sun: "Sun",
-    massnote: "Only converts the times to seconds; the picture does not change.",
+    massnote: "Converts the times to seconds and sets the accretion disk's temperature (hottest part: " +
+      "Sun 4.6 million K, Sgr A* 100,000 K, M87* 16,000 K).",
+    expo: "Exposure", eSky: "Match the sky", eDisk: "Match the disk",
     eternal: "Eternal black hole",
     eternalnote: "An idealization that also shows the universe on the other side; a real hole formed by collapse = off.",
     scene: "In space",
@@ -590,6 +604,11 @@ const I18N = {
     uiOffHint: "H brings the display back",
     photoHint1: "Photo view: P also hides the instruments · Esc returns",
     photoHint2: "Photo view (no instruments): P or Esc returns",
+    diskTsun: "Its hottest part is at 4.6 million K (the heavier the hole, the cooler).",
+    diskTsgra: "Sgr A* has no thin disk: this one is hypothetical, its hottest part set to 100,000 K.",
+    diskTm87: "Its hottest part is at 16,000 K (the heavier the hole, the cooler).",
+    expoSkyNote: "Matched to the sky, the disk is far too bright and burns out white.",
+    expoDiskNote: "Matched to the disk, the sky is far too dark and goes black.",
   },
 };
 const t = (key, ...args) => {
@@ -712,7 +731,21 @@ uniform float uNR, uNT, uLogRmin, uLogRmax, uT0, uBcr;
 uniform float uIntNR, uIntNChi;
 uniform float uDNY, uDNS, uDNV, uDY0, uDY1, uDZ0, uDZ1;
 uniform float uDVmax, uDW0, uDW1, uDBmax;
-uniform float uRin, uRout, uTmax, uExpo, uDiskRmax;
+uniform float uRin, uRout, uTmax, uExpo, uDiskRmax;   // uTmax, uExpo: the rule before 2026-11-18
+// the disk and the sky's curve by the sky's formula (2026-11-18; f64 reference
+// renderer/disk.py colour, sky_doppler.tone_white): the painting table
+// paint_table.bin, read at start-up (sky_doppler.paint_table)
+uniform highp sampler2D uPaint;      // ln(S_k(T)/S_k(T_W)) - ln(T - T0_k) on ln T, RGBA32F,
+                                     // uPaintW per row (paintLn)
+uniform vec3 uPaintX;                // ln T at entry 0, the step, the number of entries
+uniform int uPaintW;                 // entries per texel row
+uniform vec3 uPaintT0;               // the zero of each S_k (K)
+uniform bool uPaintBefore;           // knob paintBefore: the disk, the sky's curve and the
+                                     // exposure as before 2026-11-18
+uniform float uDiskTmax;             // the disk's hottest temperature (K), from the mass
+uniform float uLnX;                  // ln X: the camera's one exposure (sky, disk, other ships)
+uniform float uLnKX;                 // ln KAPPA + ln X: the disk's light (KAPPA = the blackbody
+                                     // surface in the photo sky's unit) times the exposure
 uniform float uDiskBq;               // plunging rays: y = ln w quadrature below this b
 uniform float uDiskYarc;             // ln(1/r) where each tabulated arc ends (40.5)
 uniform float uDiskXarc;             // 1/40.5 - 2/3 (the plunging azimuth's far end)
@@ -1243,21 +1276,61 @@ bool diskHitAt(float b, bool outgoing, float cotSt, float phi1, float mz,
   return false;
 }
 
-// Shakura-Sunyaev shape, T = uTmax at the profile peak x = 49/36
-float diskT(float r){
+// Shakura-Sunyaev shape, 1 at the profile peak x = 49/36, 0 at r_in
+float diskShape(float r){
   float x = r / uRin;
   float f4 = max((1.0 - inversesqrt(x)) / (x * x * x), 0.0) / 0.0566524;
-  return uTmax * pow(f4, 0.25);
+  return pow(f4, 0.25);
 }
-// blackbody at T_obs = g T(r); brightness (T_obs/T_max)^4 carries the whole
-// g^4 beaming (no separate factor: that would double it).  The disk always
-// carries its Doppler shift (its left/right asymmetry is the point); uDop only
-// switches the sky's shift, whose toggle is hidden for now (user 2026-10-06):
-// on by default for the photo sky, off for the grid (2026-11-18).
+// The painting table (sky_doppler.paint_lookup) returns ln(S_k(T)/S_k(T_W)),
+// lerped in ln T; below 50 K (and T = 0, nan) black (-1e4)
+vec3 paintAt(int i){                 // entry i of the table, laid out uPaintW per row
+  return texelFetch(uPaint, ivec2(i - (i / uPaintW) * uPaintW, i / uPaintW), 0).rgb;
+}
+// The table holds L_k = ln(S_k/S_k(T_W)) - ln(T - T0_k) with the zero T0_k of
+// each S_k taken out (uPaintT0: R 228 K, G 846 K, B 1909 K), smooth through
+// it, so that the disk's green and blue (KAPPA 3.6e11 saturates a channel at
+// S_k/S_k(T_W) ~ 3e-12) turn on where f64 says; past the table's end L_k
+// stays (S_k grows as T); a channel at T <= T0_k is black.
+vec3 paintLn(float T){
+  float x = (log(T) - uPaintX.x) / uPaintX.y;
+  if (!(x >= 0.0)) return vec3(-1.0e4);
+  int n = int(uPaintX.z + 0.5);
+  vec3 L;
+  if (x > float(n - 1)) L = paintAt(n - 1);
+  else {
+    int i = min(int(floor(x)), n - 2);
+    L = mix(paintAt(i), paintAt(i + 1), x - float(i));
+  }
+  vec3 d = T - uPaintT0;
+  return vec3(d.r > 0.0 && L.r > -5.0e3 ? L.r + log(d.r) : -1.0e4,
+              d.g > 0.0 && L.g > -5.0e3 ? L.g + log(d.g) : -1.0e4,
+              d.b > 0.0 && L.b > -5.0e3 ? L.b + log(d.b) : -1.0e4);
+}
+// I/(1+I) per channel from ln I, as 1/(1 + 1/I): finite for any ln I (the
+// disk's I passes 1e17 at the sky's exposure, so it is never formed in f32)
+vec3 curveLn(vec3 lnI){
+  return 1.0 / (1.0 + exp(clamp(-lnI, -80.0, 80.0)));
+}
+// The disk (2026-11-18, the authors' choice; f64 reference disk.py
+// colour): the sky's formula, an optically thick blackbody at T_obs = g T(r),
+// T(r) from the mass (uDiskTmax), light KAPPA S_k(T_obs)/S_k(T_W) with no
+// separate g^4, the curve on every channel with the camera's one exposure
+// (saturation goes to white), sRGB.  The disk always carries its Doppler
+// shift (its left/right asymmetry is the point); uDop only switches the sky's
+// shift, whose toggle is hidden for now (user 2026-10-06): on by default for
+// the photo sky, off for the grid (2026-11-18).
+// Before 2026-11-18 (knob paintBefore, disk.py colour_before): the blackbody
+// fit at T_obs clamped to 300-40000 K, brightness 3 (T_obs/7000 K)^4 through
+// I/(1+I) on the fit's colour, written as the screen value.
+vec3 srgbEncode(vec3 c);
 vec3 diskColor(float r, float g){
-  float Tobs = clamp(g * diskT(r), 300.0, 4.0e4);
-  float inten = uExpo * pow(Tobs / uTmax, 4.0);
-  return vec3(bbR(Tobs), bbG(Tobs), bbB(Tobs)) / 255.0 * (inten / (1.0 + inten));
+  if (uPaintBefore) {
+    float Tobs = clamp(g * (uTmax * diskShape(r)), 300.0, 4.0e4);
+    float inten = uExpo * pow(Tobs / uTmax, 4.0);
+    return vec3(bbR(Tobs), bbG(Tobs), bbB(Tobs)) / 255.0 * (inten / (1.0 + inten));
+  }
+  return srgbEncode(curveLn(uLnKX + paintLn(g * (uDiskTmax * diskShape(r)))));
 }
 
 vec3 skyGrid(vec3 s){
@@ -1320,8 +1393,11 @@ vec3 skyImage(vec3 s){
 // colour model (export_sky.py); seen with shift g it is painted
 // a max(0, S_k(gT)) / S_k(T_W) with the standard observer (CIE 1931 in the
 // sRGB primaries, white at T_W = 4200 K, no colour emphasis, also at g = 1)
-// and shown through the picture's own curve I/(1+I) read backwards
-// (sky_doppler.tone), exposure uSkyExpo.  No separate g^4.
+// and shown through the picture's own curve I/(1+I) read backwards: since
+// 2026-11-18 on every channel with the camera's one exposure uLnX
+// (sky_doppler.tone_white: saturation goes to white; the table is uPaint, the
+// disk's), before that (knob paintBefore) on the brightest channel with
+// uSkyExpo (sky_doppler.tone, the table's row 0).  No separate g^4.
 vec3 skyPaint(float T){              // max(0, S_k(T)) / S_k(T_W): row 0, lerp in ln T
   float x = (log(T) - uSkyTabX.x) / uSkyTabX.y;
   if (!(x >= 0.0)) return vec3(0.0); // colder than the table (50 K): black
@@ -1343,13 +1419,22 @@ float skyTofQ(float q){              // the temperature of colour coordinate q: 
   return exp(mix(texelFetch(uSkyTab, ivec2(i, 2), 0).r,
                  texelFetch(uSkyTab, ivec2(i + 1, 2), 0).r, x - float(i)));
 }
-vec3 skyTone(float m0, vec3 P1){     // sky_doppler.tone, in linear light
+vec3 skyTone(float m0, vec3 P1){     // sky_doppler.tone, in linear light (knob paintBefore)
   float m1 = max(P1.r, max(P1.g, P1.b));
   if (!(m1 > 0.0)) return vec3(0.0);
   const float CAP = 63.0 / 64.0;
   float i = uSkyExpo * m1 * ((m0 > CAP) ? CAP / m0 : 1.0) / (1.0 - min(m0, CAP));
   float top = min(i / (1.0 + i) * max(m0 / CAP, 1.0), 1.0);
   return P1 * (top / m1);
+}
+// sky_doppler.tone_white (since 2026-11-18): the same light as skyTone, the
+// curve on every channel (saturation goes to white), in logs: the light is
+// a c S_k(gT)/S_k(T_W) with c = X / (1 - min(m0, 63/64)) (x 63/64 / m0 past it)
+vec3 skyToneWhite(float m0, float a, vec3 lnS){
+  if (!(a > 0.0)) return vec3(0.0);
+  const float CAP = 63.0 / 64.0;
+  float lnc = uLnX + log(((m0 > CAP) ? CAP / m0 : 1.0) / (1.0 - min(m0, CAP)));
+  return min(curveLn(log(a) + lnc + lnS) * max(m0 / CAP, 1.0), 1.0);
 }
 vec3 srgbEncode(vec3 c){
   c = clamp(c, 0.0, 1.0);
@@ -1533,6 +1618,9 @@ void main(){
     if (q <= 1.0) {
       float gs = uShipC[i].w;
       vec3 sc = dopplerShift(uShipC[i].xyz * (0.55 + 0.45 * sqrt(1.0 - q)), gs) * pow(gs, 4.0);
+      // the camera's one exposure (2026-11-18; 1 at "match the sky"); the
+      // ship's own painting is not changed (a later request)
+      if (!uPaintBefore && uLnX != 0.0) sc *= exp(uLnX);
       frag = vec4(sc / (1.0 + sc), 1.0); return;
     }
   }
@@ -1543,7 +1631,8 @@ void main(){
   if (fate == 0) { frag = vec4(0.0, 0.0, 0.0, 1.0); return; }
   if (skyTemp) {
     float gS = dopSky ? g : 1.0;
-    vec3 lin = skyTone(skyA * skyEmax(skyT), skyA * skyPaint(gS * skyT));
+    vec3 lin = uPaintBefore ? skyTone(skyA * skyEmax(skyT), skyA * skyPaint(gS * skyT))
+                            : skyToneWhite(skyA * skyEmax(skyT), skyA, paintLn(gS * skyT));
     if (fate == 3) lin = lin.bgr;
     frag = vec4(srgbEncode(lin), 1.0); return;
   }
@@ -1570,10 +1659,10 @@ async function main(){
   const meta = await (await fetch("meta.json", { cache: "no-cache" })).json();
   const q = meta.payload_id ? "?v=" + meta.payload_id : "";
   const bin = name => fetch(name + ".bin" + q).then(r => r.arrayBuffer());
-  const [buf, ibuf, rbuf, dus, das, duc, dac, daux] = await Promise.all([
+  const [buf, ibuf, rbuf, dus, das, duc, dac, daux, pbuf] = await Promise.all([
     bin("psi_table"), bin("interior_table"), bin("interior_rgrid"),
     bin("disk_u_scat"), bin("disk_a_scat"), bin("disk_u_cap"),
-    bin("disk_a_cap"), bin("disk_aux"),
+    bin("disk_a_cap"), bin("disk_aux"), bin("paint_table"),
   ]);
   const need = (b, floats, name) => {
     if (b.byteLength !== 4 * floats)
@@ -1586,8 +1675,12 @@ async function main(){
   // these (export_table.py, 2026-10-13)
   if (meta.disk_b_quad === undefined || meta.disk_y_arc === undefined
       || meta.disk_scat_q0 === undefined || meta.disk_row_floor === undefined
-      || meta.disk_x_arc === undefined)
+      || meta.disk_x_arc === undefined
+      // the painting table and the disk's constants (2026-11-18)
+      || meta.paint_n === undefined || meta.paint_t_zero === undefined || meta.disk_t_max === undefined
+      || meta.disk_ln_expo === undefined)
     throw new Error(t("metaOld"));
+  need(pbuf, meta.paint_n * 4, "paint_table");
   const data = new Float32Array(buf);
 
   const prog = gl.createProgram();
@@ -1631,6 +1724,9 @@ async function main(){
   makeTex(6, gl.R32F, meta.disk_nv, meta.disk_ny, gl.RED,
           new Float32Array(dac));
   makeTex(7, gl.RGBA32F, meta.disk_ny, 1, gl.RGBA, new Float32Array(daux));
+  // the painting table as paint_w x (paint_n / paint_w) texels (WebGL2 only
+  // guarantees 2048 texels in a row)
+  makeTex(11, gl.RGBA32F, meta.paint_w, meta.paint_n / meta.paint_w, gl.RGBA, new Float32Array(pbuf));
   gl.activeTexture(gl.TEXTURE0);
 
   const U = n => gl.getUniformLocation(prog, n);
@@ -1663,8 +1759,12 @@ async function main(){
   gl.uniform1f(U("uDBmax"), meta.disk_b_max);
   gl.uniform1f(U("uRin"), 3.0);      // ISCO (canonical defaults: DESIGN.md)
   gl.uniform1f(U("uRout"), 12.0);
-  gl.uniform1f(U("uTmax"), 7000.0);
+  gl.uniform1f(U("uTmax"), 7000.0);  // the disk before 2026-11-18 (knob paintBefore)
   gl.uniform1f(U("uExpo"), 3.0);
+  gl.uniform1i(U("uPaint"), 11);
+  gl.uniform3f(U("uPaintX"), meta.paint_x0, meta.paint_dx, meta.paint_n);
+  gl.uniform1i(U("uPaintW"), meta.paint_w);
+  gl.uniform3fv(U("uPaintT0"), meta.paint_t_zero);
   gl.uniform1f(U("uDiskRmax"), meta.disk_R_cam_max);
   gl.uniform1f(U("uDiskBq"), meta.disk_b_quad);
   gl.uniform1f(U("uDiskYarc"), meta.disk_y_arc);
@@ -1751,6 +1851,16 @@ async function main(){
   // starlight shifted by g = 1/sqrt(1 - rS/R) in every direction, so its sky
   // carries the sky's Doppler too (with dop, which is off for the grid)
   const skyKnobs = { skyTemp: true, skyDopAll: true, skyExpo: 1 };
+  // the disk by the sky's formula and saturation to white (2026-11-18, the
+  // authors' choice; f64 renderer/disk.py colour, sky_doppler.tone_white):
+  // paintBefore (no UI) draws the disk, the sky's curve and the exposure as
+  // before; expo = the camera's one exposure for the sky, the disk and the
+  // other ships, "sky" (X = 1) or "disk" (the hottest unshifted point of the
+  // mass's disk at i = 1: meta.disk_ln_expo; only while the disk is on, the
+  // control sits with the disk), times skyExpo
+  const paintKnobs = { paintBefore: false, expo: "sky" };
+  const expoLn = () => (paintKnobs.expo === "disk" && el("disk").checked
+    ? meta.disk_ln_expo[el("mass").value] : 0) + Math.log(skyKnobs.skyExpo);
   // the sky's Doppler (knob dop; its checkbox is hidden): each sky keeps its
   // own setting, on for the photo sky and off for the grid by default
   // (2026-11-18); the checkbox shows the selected sky's (updateSky)
@@ -2770,6 +2880,8 @@ async function main(){
   document.addEventListener("visibilitychange", () => { if (document.hidden) clearControls(); });
 
   el("sky").addEventListener("change", () => { updateSky(); canvas.focus(); });
+  for (const id of ["eSky", "eDisk"])
+    el(id).addEventListener("change", () => { if (el(id).checked) paintKnobs.expo = el(id).value; });
   el("dop").addEventListener("change", () => { dopBySky[el("sky").value] = el("dop").checked; });
   updateSky();                         // default = photo sky: start loading now
 
@@ -3005,6 +3117,42 @@ async function main(){
       draw(true);
       return out;
     },
+    // probeDiskColour(o): pin state o (time paused, the disk on, no ships),
+    // draw the colour, then the disk probe's r (mode 1) and g (mode 2), all
+    // from the same event; returns the full frames as base64 RGBA (the probe
+    // frames in probe()'s 24-bit encoding, 0 = no disk) with the state, the
+    // mass and the exposure the frame was drawn with (check_disk_colour.py
+    // paints every disk pixel from its own r and g in f64: disk.py colour)
+    probeDiskColour(o){
+      const saved = this.state();
+      this.set({ ...o, disk: true, ships: false, paused: true });
+      gl.disable(gl.DITHER);
+      const w = canvas.width, h = canvas.height;
+      const frame = () => {
+        const b = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, b);
+        let s = "";
+        for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+        return btoa(s);
+      };
+      draw(true);
+      const colour = frame();
+      const chans = [];
+      for (const k of [1, 2]) {
+        gl.uniform1i(U("uDiskProbe"), k);
+        draw(true);
+        chans.push(frame());
+      }
+      gl.uniform1i(U("uDiskProbe"), 0);
+      gl.enable(gl.DITHER);
+      const st = this.state();
+      const out = { kind: "diskColour", w, h, R: camera.R, mode, active: camera.active,
+                    interior: camera.interior, state: st, mass: st.mass, expo: st.expo, lnX: st.lnX,
+                    paintBefore: st.paintBefore, tmax: meta.disk_t_max[st.mass], colour, chans };
+      this.set(saved);
+      draw(true);
+      return out;
+    },
     // ships: setShips(list) replaces the ships (see setShips above), getShips()
     // lists them, probeShips() draws once and returns, in check_ships.py's
     // format, the camera event and frame the ships were solved for, every
@@ -3061,6 +3209,14 @@ async function main(){
       if (o.skyTemp !== undefined) { skyKnobs.skyTemp = !!o.skyTemp; if (skyKnobs.skyTemp) loadSkyTemp(); }
       if (o.skyDopAll !== undefined) skyKnobs.skyDopAll = !!o.skyDopAll;
       if (o.skyExpo !== undefined) skyKnobs.skyExpo = +o.skyExpo;
+      // the disk by the sky's formula (2026-11-18): paintBefore draws the disk,
+      // the sky's curve and the exposure as before; expo = "sky" | "disk" (the
+      // control under the disk; skyExpo multiplies it since 2026-11-18)
+      if (o.paintBefore !== undefined) paintKnobs.paintBefore = !!o.paintBefore;
+      if (o.expo !== undefined) {
+        paintKnobs.expo = o.expo === "disk" ? "disk" : "sky";
+        el(paintKnobs.expo === "disk" ? "eDisk" : "eSky").checked = true;
+      }
       if (o.Rslider !== undefined) {
         el("R").value = o.Rslider;
         camera.R = sliderToR(parseFloat(el("R").value));
@@ -3103,6 +3259,7 @@ async function main(){
                       disk: el("disk").checked, inc: el("inc").value,
                       diskAtabR: diskKnobs.diskAtabR, diskRmin: diskKnobs.diskRmin,
                       skyTemp: skyKnobs.skyTemp, skyDopAll: skyKnobs.skyDopAll, skyExpo: skyKnobs.skyExpo,
+                      paintBefore: paintKnobs.paintBefore, expo: paintKnobs.expo, lnX: expoLn(),
                       mass: el("mass").value,
                       sky: el("sky").value,
                       viewFwd: [...view.fwd], viewUp: [...view.up] }; },
@@ -3198,6 +3355,11 @@ async function main(){
     setText("fovval", fov.toFixed(0));
     setText("incval", el("inc").value);
     setHidden("incrow", !el("disk").checked);
+    if (el("disk").checked) {
+      const m = el("mass").value;
+      setText("disknote", t(m === "sun" ? "diskTsun" : m === "M87" ? "diskTm87" : "diskTsgra") + " "
+                          + t(paintKnobs.expo === "disk" ? "expoDiskNote" : "expoSkyNote"));
+    }
     // the observer control: what can be chosen here, and what the choice is;
     // why a segment is off goes on its own line under the description
     const offS = mode !== "static" && R < R_STATIC_MIN, offO = mode !== "orbit" && R <= 3.0;
@@ -3323,6 +3485,11 @@ async function main(){
     gl.uniform1i(U("uSkyTemp"), skyTempOn ? 1 : 0);
     gl.uniform1i(U("uSkyDopAll"), skyKnobs.skyDopAll ? 1 : 0);
     gl.uniform1f(U("uSkyExpo"), skyKnobs.skyExpo);
+    const lnX = expoLn();
+    gl.uniform1i(U("uPaintBefore"), paintKnobs.paintBefore ? 1 : 0);
+    gl.uniform1f(U("uDiskTmax"), meta.disk_t_max[el("mass").value]);
+    gl.uniform1f(U("uLnX"), lnX);
+    gl.uniform1f(U("uLnKX"), meta.disk_ln_kappa + lnX);
     const inc = parseFloat(el("inc").value) * Math.PI / 180;
     gl.uniform3fv(U("uZd"), [0, Math.sin(inc), Math.cos(inc)]);
     gl.uniform1f(U("uDiskAtabR"), Number.isFinite(diskKnobs.diskAtabR)
