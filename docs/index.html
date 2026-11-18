@@ -740,6 +740,21 @@ uniform bool uProbe;                 // machine check: output psi, not colour
 uniform sampler2D uSkyImg;           // photo sky (equirectangular, galactic)
 uniform bool uSkyImage;              // true: photo sky, false: 15-deg grid
 uniform float uSkyW;                 // photo sky width in texels (mip level 0)
+// photo sky by the stars' temperature (knob skyTemp, the default since
+// 2026-11-18; __bh.set({skyTemp: false}) draws the photo as before; f64
+// reference renderer/sky_doppler.py)
+uniform bool uSkyTemp;
+uniform highp sampler2D uSkyAT;      // (a, a q(T)) per texel, RG16F, mips by 2 x 2 means
+uniform highp sampler2D uSkyTab;     // 3 x N RGBA32F: row 0 ln(S_k(T)/S_k(T_W)), row 1
+                                     // E_max(T), row 2 ln T of the colour coordinate q
+uniform vec4 uSkyTabX;               // ln T at entry 0 and the step: row 0 (x, y), row 1 (z, w)
+uniform vec2 uSkyTabQ;               // q at entry 0 and the step of row 2
+uniform float uSkyTabN, uSkyTW, uSkyTw0;   // entries, level-0 width, T where a = 0
+uniform float uSkyExpo;              // knob skyExpo: exposure multiplier (1 = fixed)
+uniform bool uSkyDopAll;             // knob skyDopAll: the sky's Doppler also for the
+                                     // observer at rest (orbits are flights already)
+uniform int uSkyProbe;               // machine check (probeSky): 1 u, 2 v, 3 lod,
+                                     // 4 log2(g)/4 + 4, 5 a, 6 T / 1e4
 const float PI = 3.141592653589793;
 uniform float uEngineR;              // falling camera: interior engine below this
                                      // radius = the psi table's R_min (meta)
@@ -1237,7 +1252,8 @@ float diskT(float r){
 // blackbody at T_obs = g T(r); brightness (T_obs/T_max)^4 carries the whole
 // g^4 beaming (no separate factor: that would double it).  The disk always
 // carries its Doppler shift (its left/right asymmetry is the point); uDop only
-// switches the sky's shift, whose toggle is hidden for now (user 2026-10-06).
+// switches the sky's shift, whose toggle is hidden for now (user 2026-10-06):
+// on by default for the photo sky, off for the grid (2026-11-18).
 vec3 diskColor(float r, float g){
   float Tobs = clamp(g * diskT(r), 300.0, 4.0e4);
   float inten = uExpo * pow(Tobs / uTmax, 4.0);
@@ -1278,18 +1294,66 @@ vec3 skyGrid(vec3 s){
 const vec3 GAL_C = vec3(1.0, 0.0, 0.0);                 // (l, b) = (0, 0)
 const vec3 GAL_L90 = vec3(0.0, -0.5, -0.8660254038);    // (90 deg, 0)
 const vec3 GAL_N = vec3(0.0, 0.8660254038, -0.5);       // b = +90 deg
-vec3 skyImage(vec3 s){
+// The photo sky's texture coordinate and explicit mip level for direction s
+// (both photo textures are 2:1 equirectangular; w = the level-0 width).
+void skyCoord(vec3 s, float w, out vec2 uv, out float lod){
   float l = atan(dot(s, GAL_L90), dot(s, GAL_C));
   float b = asin(clamp(dot(s, GAL_N), -1.0, 1.0));
-  vec2 uv = vec2(0.5 - l / (2.0 * PI), 0.5 - b / PI);
+  uv = vec2(0.5 - l / (2.0 * PI), 0.5 - b / PI);
   // Explicit mip level from this pixel's angular footprint on the sky.  The
   // derivatives of the unit vector s are continuous across the l = 180 deg
   // seam, unlike those of uv.x; near the photon ring the footprint grows
   // without bound and the lookup tends to the mean sky, as it should.
   float foot = max(length(dFdx(s)), length(dFdy(s)));
-  float lod = log2(max(foot * uSkyW / (2.0 * PI), 1e-6));
+  lod = log2(max(foot * w / (2.0 * PI), 1e-6));
   lod = isnan(lod) ? 0.0 : clamp(lod, 0.0, 13.0);
+}
+vec3 skyImage(vec3 s){
+  vec2 uv; float lod;
+  skyCoord(s, uSkyW, uv, lod);
   return textureLod(uSkyImg, uv, lod).rgb;
+}
+
+// ---- photo sky by the stars' temperature (knob skyTemp; formulas and the
+// f64 reference: renderer/sky_doppler.py).  Each texel is one star of light
+// amount a and temperature T, read from the picture through its author's own
+// colour model (export_sky.py); seen with shift g it is painted
+// a max(0, S_k(gT)) / S_k(T_W) with the standard observer (CIE 1931 in the
+// sRGB primaries, white at T_W = 4200 K, no colour emphasis, also at g = 1)
+// and shown through the picture's own curve I/(1+I) read backwards
+// (sky_doppler.tone), exposure uSkyExpo.  No separate g^4.
+vec3 skyPaint(float T){              // max(0, S_k(T)) / S_k(T_W): row 0, lerp in ln T
+  float x = (log(T) - uSkyTabX.x) / uSkyTabX.y;
+  if (!(x >= 0.0)) return vec3(0.0); // colder than the table (50 K): black
+  int i = min(int(floor(x)), int(uSkyTabN) - 2);
+  float f = x - float(i);            // > 1 past the table: Rayleigh-Jeans extrapolation
+  vec3 a = texelFetch(uSkyTab, ivec2(i, 0), 0).rgb;
+  vec3 b = texelFetch(uSkyTab, ivec2(i + 1, 0), 0).rgb;
+  return exp(min(mix(a, b, f), 80.0));
+}
+float skyEmax(float T){              // max_k E_k(T), the picture's brightest channel per unit a
+  float x = clamp((log(T) - uSkyTabX.z) / uSkyTabX.w, 0.0, uSkyTabN - 1.0);
+  int i = min(int(floor(x)), int(uSkyTabN) - 2);
+  return mix(texelFetch(uSkyTab, ivec2(i, 1), 0).r,
+             texelFetch(uSkyTab, ivec2(i + 1, 1), 0).r, x - float(i));
+}
+float skyTofQ(float q){              // the temperature of colour coordinate q: row 2, lerp in q
+  float x = clamp((q - uSkyTabQ.x) / uSkyTabQ.y, 0.0, uSkyTabN - 1.0);
+  int i = min(int(floor(x)), int(uSkyTabN) - 2);
+  return exp(mix(texelFetch(uSkyTab, ivec2(i, 2), 0).r,
+                 texelFetch(uSkyTab, ivec2(i + 1, 2), 0).r, x - float(i)));
+}
+vec3 skyTone(float m0, vec3 P1){     // sky_doppler.tone, in linear light
+  float m1 = max(P1.r, max(P1.g, P1.b));
+  if (!(m1 > 0.0)) return vec3(0.0);
+  const float CAP = 63.0 / 64.0;
+  float i = uSkyExpo * m1 * ((m0 > CAP) ? CAP / m0 : 1.0) / (1.0 - min(m0, CAP));
+  float top = min(i / (1.0 + i) * max(m0 / CAP, 1.0), 1.0);
+  return P1 * (top / m1);
+}
+vec3 srgbEncode(vec3 c){
+  c = clamp(c, 0.0, 1.0);
+  return mix(12.92 * c, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(0.0031308, c));
 }
 
 void main(){
@@ -1425,7 +1489,31 @@ void main(){
   // right at the shadow edge.
   float psiS = (fate == 0 || isnan(psi)) ? 0.0 : psi;
   vec3 sky = -cos(psiS) * aHat + sin(psiS) * p;
-  vec3 col = uSkyImage ? skyImage(sky) : skyGrid(sky);
+  vec3 col;
+  bool skyTemp = uSkyImage && uSkyTemp;
+  float skyA = 0.0, skyT = uSkyTw0, skyLod = 0.0;
+  vec2 skyUV = vec2(0.0);
+  if (skyTemp) {
+    // (A, B) = (a, a q(T)) filtered: the star of the footprint has light A
+    // and colour coordinate B / A (the mean rule of sky_doppler.py)
+    skyCoord(sky, uSkyTW, skyUV, skyLod);
+    vec2 at = textureLod(uSkyAT, skyUV, skyLod).rg;
+    skyA = max(at.x, 0.0);
+    if (at.x > 0.0) skyT = skyTofQ(at.y / at.x);
+    col = vec3(0.0);
+  } else {
+    col = uSkyImage ? skyImage(sky) : skyGrid(sky);
+  }
+  // the sky's Doppler: falling, flying (orbits included) and inside; the
+  // observer at rest too with the knob skyDopAll
+  bool dopSky = uDop && (uFFO || uFlying || interior || uSkyDopAll);
+  if (uSkyProbe > 0) {
+    float gS = dopSky ? g : 1.0;
+    float pv = (uSkyProbe == 1) ? skyUV.x : (uSkyProbe == 2) ? skyUV.y
+             : (uSkyProbe == 3) ? skyLod : (uSkyProbe == 4) ? 0.25 * log2(gS) + 4.0
+             : (uSkyProbe == 5) ? skyA : skyT * 1e-4;
+    frag = encodePsi(pv, fate == 0 || diskHit || !skyTemp); return;
+  }
   // ---- other ships: each image is a small ellipse on the camera's sky
   // (centre uShipA.xyz, in-plane axis uShipB.xyz with the angular radii
   // uShipA.w in the plane and uShipB.w across it), solved on the CPU in f64
@@ -1453,7 +1541,13 @@ void main(){
   if (fate == 3) col = col.bgr;
   if (diskHit) { frag = vec4(diskColor(dR, dG), 1.0); return; }
   if (fate == 0) { frag = vec4(0.0, 0.0, 0.0, 1.0); return; }
-  if (uDop && (uFFO || uFlying || interior)) {
+  if (skyTemp) {
+    float gS = dopSky ? g : 1.0;
+    vec3 lin = skyTone(skyA * skyEmax(skyT), skyA * skyPaint(gS * skyT));
+    if (fate == 3) lin = lin.bgr;
+    frag = vec4(srgbEncode(lin), 1.0); return;
+  }
+  if (dopSky) {
     col = dopplerShift(col, g);       // chroma (Nakayama-Oda Sec. 5.4)
     col *= pow(g, 4.0);               // bolometric beaming
     col = col / (1.0 + col);          // Reinhard
@@ -1630,9 +1724,126 @@ async function main(){
     updateSky();
     return skyLoaded;
   }
+  // ---- photo sky by the stars' temperature (knob skyTemp, 2026-11-17; the
+  // default since 2026-11-18, __bh.set({skyTemp: false}) draws the photo as
+  // before).  The payload sky_milkyway_temp.json + .png (export_sky.py; layout
+  // and every formula: renderer/sky_doppler.py) is fetched when the photo sky is
+  // selected with the knob on (at start-up by default).  The page
+  // decodes a and T (12 bits each, packed in RGB), builds the mip levels of
+  // (A, B) = (a, a q(T)) by 2 x 2 averages (so the GPU's trilinear filter
+  // keeps the mean rule of sky_doppler.py, whose mip_levels is the same) as
+  // RG16F, and uploads the painting table (RGBA32F, 3 x N).  Units 9 and 10 hold complete 1x1 placeholders until then.  Until
+  // it is on the GPU, or if it cannot be read (one console line says so), the
+  // photo sky is drawn as before the scheme, without the sky's Doppler (draw()).
+  const skyAT = gl.createTexture(), skyTabTex = gl.createTexture();   // placeholders
+  for (const [unit, tex, ifmt, fmt, n] of [[9, skyAT, gl.RG16F, gl.RG, 2],
+                                          [10, skyTabTex, gl.RGBA32F, gl.RGBA, 4]]) {
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, 1, 1, 0, fmt, gl.FLOAT, new Float32Array(n));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  }
+  gl.activeTexture(gl.TEXTURE0);
+  gl.uniform1i(U("uSkyAT"), 9);
+  gl.uniform1i(U("uSkyTab"), 10);
+  const skyKnobs = { skyTemp: true, skyDopAll: false, skyExpo: 1 };
+  // the sky's Doppler (knob dop; its checkbox is hidden): each sky keeps its
+  // own setting, on for the photo sky and off for the grid by default
+  // (2026-11-18); the checkbox shows the selected sky's (updateSky)
+  const dopBySky = { milkyway: true, grid: false };
+  let skyTempState = "none";       // none | loading | ready | failed
+  let skyTempLoaded = null, skyTempInfo = null;
+  function loadSkyTemp(){
+    if (skyTempLoaded) return skyTempLoaded;
+    skyTempState = "loading";
+    skyTempLoaded = (async () => {
+      try {
+        const m = await (await fetch("sky_milkyway_temp.json", { cache: "no-cache" })).json();
+        if (m.format !== "sky-temp-2") throw new Error("unknown format " + m.format + " (rerun export_sky.py)");
+        const res = await fetch(m.png);
+        if (!res.ok) throw new Error(m.png + ": HTTP " + res.status);
+        const bmp = await createImageBitmap(await res.blob(),
+          { colorSpaceConversion: "none", premultiplyAlpha: "none" });
+        const W = bmp.width, H = bmp.height;
+        const cv = document.createElement("canvas");
+        cv.width = W; cv.height = H;
+        const cx = cv.getContext("2d", { willReadFrequently: true });
+        cx.drawImage(bmp, 0, 0);
+        const px = cx.getImageData(0, 0, W, H).data;
+        bmp.close();
+        // decode (sky_doppler.decode_payload) into level 0 = (A, B) interleaved
+        const amax = (1 << m.a_bits) - 1;
+        const aOf = new Float64Array(amax + 1), qOf = m.q_of_code;   // q of every T code
+        for (let c = 0; c <= amax; c++) aOf[c] = Math.pow(c / amax, m.a_power) * m.a_scale;
+        let lev = new Float32Array(2 * W * H);
+        let sum = [0, 0, 0];
+        for (let i = 0, j = 0; i < W * H; i++, j += 4) {
+          const r = px[j], g8 = px[j + 1], b = px[j + 2];
+          sum[0] += r; sum[1] += g8; sum[2] += b;
+          const a = aOf[(r << 4) | (g8 >> 4)];
+          lev[2 * i] = a;
+          lev[2 * i + 1] = a * qOf[((g8 & 15) << 8) | b];
+        }
+        // the mip chain: 2 x 2 averages (one axis once the other reaches 1)
+        const levels = [[lev, W, H]];
+        let w = W, h = H;
+        while (w > 1 || h > 1) {
+          const w2 = Math.max(w >> 1, 1), h2 = Math.max(h >> 1, 1);
+          const nx = new Float32Array(2 * w2 * h2);
+          for (let y = 0; y < h2; y++) {
+            const y0 = (h > 1) ? 2 * y : y, y1 = (h > 1) ? 2 * y + 1 : y;
+            for (let x = 0; x < w2; x++) {
+              const x0 = (w > 1) ? 2 * x : x, x1 = (w > 1) ? 2 * x + 1 : x;
+              for (let k = 0; k < 2; k++) {
+                const p00 = lev[2 * (y0 * w + x0) + k], p01 = lev[2 * (y0 * w + x1) + k];
+                const p10 = lev[2 * (y1 * w + x0) + k], p11 = lev[2 * (y1 * w + x1) + k];
+                nx[2 * (y * w2 + x) + k] = ((p00 + p10) + (p01 + p11)) * 0.25;
+              }
+            }
+          }
+          lev = nx; w = w2; h = h2;
+          levels.push([lev, w, h]);
+        }
+        // devices whose texture limit is below the width start one level down
+        const max = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+        let base = 0;
+        while (levels[base][1] > max) base++;
+        gl.activeTexture(gl.TEXTURE9);
+        const tex = gl.createTexture();         // immutable storage: replaces the placeholder
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texStorage2D(gl.TEXTURE_2D, levels.length - base, gl.RG16F, levels[base][1], levels[base][2]);
+        for (let d = base; d < levels.length; d++)
+          gl.texSubImage2D(gl.TEXTURE_2D, d - base, 0, 0, levels[d][1], levels[d][2], gl.RG, gl.FLOAT, levels[d][0]);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.activeTexture(gl.TEXTURE10);
+        gl.bindTexture(gl.TEXTURE_2D, skyTabTex);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, m.tab_n, 3, 0, gl.RGBA, gl.FLOAT, new Float32Array(m.tab));
+        gl.activeTexture(gl.TEXTURE0);
+        gl.uniform4f(U("uSkyTabX"), m.tab_x0[0], m.tab_dx[0], m.tab_x0[1], m.tab_dx[1]);
+        gl.uniform1f(U("uSkyTabN"), m.tab_n);
+        gl.uniform1f(U("uSkyTW"), levels[base][1]);
+        gl.uniform2f(U("uSkyTabQ"), m.tab_x0[2], m.tab_dx[2]);
+        gl.uniform1f(U("uSkyTw0"), m.t_white);
+        skyTempInfo = { width: W, height: H, base, levels: levels.length - base, sum, meta: m.format };
+        skyTempState = "ready";
+        return true;
+      } catch (e) {
+        skyTempState = "failed";
+        console.warn("photo sky by temperature: payload not read (" + e.message + "); the sky stays as it was");
+        return false;
+      }
+    })();
+    return skyTempLoaded;
+  }
   function updateSky(){
     const want = el("sky").value === "milkyway";
     if (want && skyState === "none") loadSky();
+    if (want && skyKnobs.skyTemp && skyTempState === "none") loadSkyTemp();
+    el("dop").checked = !!dopBySky[el("sky").value];
     el("skycredit").hidden = !want;
     el("skynote").textContent = !want ? ""
       : skyState === "loading" ? t("skyLoading")
@@ -2556,6 +2767,7 @@ async function main(){
   document.addEventListener("visibilitychange", () => { if (document.hidden) clearControls(); });
 
   el("sky").addEventListener("change", () => { updateSky(); canvas.focus(); });
+  el("dop").addEventListener("change", () => { dopBySky[el("sky").value] = el("dop").checked; });
   updateSky();                         // default = photo sky: start loading now
 
   let dragging = false, px = 0, py = 0;
@@ -2630,8 +2842,54 @@ async function main(){
   window.__bh = {
     drawOnce(){ draw(true); },
     // skyReady(): resolves once the photo sky is on the GPU (loads it if
-    // needed), so a check can select it and wait before snap/probe.
-    skyReady(){ return loadSky(); },
+    // needed), with the temperature payload too while the knob skyTemp is on
+    // (true / false = the photo itself), so a check can select it and wait
+    // before snap/probe.
+    skyReady(){ return loadSky().then(ok => skyKnobs.skyTemp ? loadSkyTemp().then(() => ok) : ok); },
+    // skyTempReady(): loads the temperature payload (knob skyTemp) and
+    // resolves true once it is on the GPU; skyTempInfo() = its size, the mip
+    // base level and the byte sums of the decoded PNG (check_sky_doppler.py
+    // compares them with the file).
+    skyTempReady(){ return loadSkyTemp(); },
+    skyTempInfo(){ return skyTempInfo; },
+    // probeSky(o): pin state o (time paused), draw the colour and then the
+    // sky probe channels (u, v, lod, g, a, T: uSkyProbe 1-6, probe()'s 24-bit
+    // encoding, 0 = not the temperature sky: shadow, disk, grid, knob off),
+    // all from the same event; returns the full frames as base64 RGBA with
+    // the camera (check_sky_doppler.py recomputes every pixel in f64 from
+    // its own u, v, lod and g).
+    probeSky(o){
+      const saved = this.state();
+      this.set({ ...o, paused: true });
+      gl.disable(gl.DITHER);
+      const w = canvas.width, h = canvas.height;
+      const frame = () => {
+        const b = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, b);
+        let s = "";
+        for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode.apply(null, b.subarray(i, i + 0x8000));
+        return btoa(s);
+      };
+      draw(true);
+      const colour = frame();
+      const chans = [];
+      for (let k = 1; k <= 6; k++) {
+        gl.uniform1i(U("uSkyProbe"), k);
+        draw(true);
+        chans.push(frame());
+      }
+      gl.uniform1i(U("uSkyProbe"), 0);
+      gl.enable(gl.DITHER);
+      const b = viewBasis();
+      const out = { kind: "sky", w, h, R: camera.R, aHat: scale(-1, camera.rHat), beta: [...lastBeta],
+                    fwd: b.fwd, right: b.right, up: b.up, mode, active: camera.active,
+                    interior: camera.interior, state: this.state(),
+                    tanHalf: Math.tan(parseFloat(el("fov").value) * Math.PI / 360),
+                    skyTemp: skyKnobs.skyTemp && skyTempState === "ready", colour, chans };
+      this.set(saved);
+      draw(true);
+      return out;
+    },
     snap(o){
       const saved = this.state();
       this.set(o);
@@ -2793,6 +3051,12 @@ async function main(){
       if (o.ships !== undefined) el("ships").checked = o.ships;
       if (o.diskAtabR !== undefined) diskKnobs.diskAtabR = o.diskAtabR;
       if (o.diskRmin !== undefined) diskKnobs.diskRmin = o.diskRmin;
+      // knobs of the photo sky by the stars' temperature (no UI): skyTemp
+      // switches the scheme (loads its payload), skyDopAll shifts the sky of
+      // the observer at rest too (with dop), skyExpo multiplies the exposure
+      if (o.skyTemp !== undefined) { skyKnobs.skyTemp = !!o.skyTemp; if (skyKnobs.skyTemp) loadSkyTemp(); }
+      if (o.skyDopAll !== undefined) skyKnobs.skyDopAll = !!o.skyDopAll;
+      if (o.skyExpo !== undefined) skyKnobs.skyExpo = +o.skyExpo;
       if (o.Rslider !== undefined) {
         el("R").value = o.Rslider;
         camera.R = sliderToR(parseFloat(el("R").value));
@@ -2806,10 +3070,13 @@ async function main(){
         const m = o.observer ?? (o.ffo ? "freefall" : "static");
         if (m === "freefall" || m === "static") setMode(m);
       }
-      if (o.dop !== undefined) el("dop").checked = o.dop;
+      // the sky before dop: dop is the selected sky's own (dopBySky), so
+      // set({sky: "grid", dop: true}) shifts the grid and a restored state()
+      // gives each sky its own setting back
+      if (o.sky !== undefined) { el("sky").value = o.sky; updateSky(); }
+      if (o.dop !== undefined) { el("dop").checked = !!o.dop; dopBySky[el("sky").value] = !!o.dop; }
       if (o.eternal !== undefined) el("eternal").checked = o.eternal;
       if (o.disk !== undefined) el("disk").checked = o.disk;
-      if (o.sky !== undefined) { el("sky").value = o.sky; updateSky(); }
       if (o.inc !== undefined) el("inc").value = o.inc;
       if (o.mass !== undefined) el("mass").value = o.mass;
       if (o.fov !== undefined) el("fov").value = o.fov;
@@ -2831,6 +3098,7 @@ async function main(){
                       dop: el("dop").checked, eternal: el("eternal").checked,
                       disk: el("disk").checked, inc: el("inc").value,
                       diskAtabR: diskKnobs.diskAtabR, diskRmin: diskKnobs.diskRmin,
+                      skyTemp: skyKnobs.skyTemp, skyDopAll: skyKnobs.skyDopAll, skyExpo: skyKnobs.skyExpo,
                       mass: el("mass").value,
                       sky: el("sky").value,
                       viewFwd: [...view.fwd], viewUp: [...view.up] }; },
@@ -3039,11 +3307,18 @@ async function main(){
     gl.uniform1i(U("uFFO"), (!camera.active && mode === "freefall") ? 1 : 0);
     gl.uniform1i(U("uFlying"), camera.active ? 1 : 0);
     gl.uniform1i(U("uFlyIn"), (camera.active && camera.interior) ? 1 : 0);
-    gl.uniform1i(U("uDop"), el("dop").checked ? 1 : 0);
+    const skyPhoto = el("sky").value === "milkyway";
+    const skyTempOn = skyPhoto && skyKnobs.skyTemp && skyTempState === "ready";
+    // while the temperature payload is loading or could not be read, the
+    // photo sky is drawn as before the scheme: without the sky's Doppler
+    const skyTempWait = skyPhoto && skyKnobs.skyTemp && !skyTempOn;
+    gl.uniform1i(U("uDop"), (el("dop").checked && !skyTempWait) ? 1 : 0);
     gl.uniform1i(U("uEternal"), el("eternal").checked ? 1 : 0);
     gl.uniform1i(U("uDisk"), el("disk").checked ? 1 : 0);
-    gl.uniform1i(U("uSkyImage"),
-                 (el("sky").value === "milkyway" && skyState === "ready") ? 1 : 0);
+    gl.uniform1i(U("uSkyImage"), (skyPhoto && (skyState === "ready" || skyTempOn)) ? 1 : 0);
+    gl.uniform1i(U("uSkyTemp"), skyTempOn ? 1 : 0);
+    gl.uniform1i(U("uSkyDopAll"), skyKnobs.skyDopAll ? 1 : 0);
+    gl.uniform1f(U("uSkyExpo"), skyKnobs.skyExpo);
     const inc = parseFloat(el("inc").value) * Math.PI / 180;
     gl.uniform3fv(U("uZd"), [0, Math.sin(inc), Math.cos(inc)]);
     gl.uniform1f(U("uDiskAtabR"), Number.isFinite(diskKnobs.diskAtabR)

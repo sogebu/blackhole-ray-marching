@@ -1,0 +1,17 @@
+sky_milkyway_temp.png — the same all-sky Milky Way image, re-encoded as the
+light amount and the temperature of one star per pixel (the photo-sky Doppler
+option of the viewer; sky_milkyway_temp.json holds its constants)
+
+Original: "Milkyway360-latlon-32kscaled8k-4200k-m14-s4-g1.png"
+  by Kevin M. Loch (Wikimedia Commons user Kevinmloch), rendered with
+  bsrender (https://github.com/kevinloch/bsrender) from ESA Gaia EDR3 data.
+  https://commons.wikimedia.org/wiki/File:Milkyway360-latlon-32kscaled8k-4200k-m14-s4-g1.png
+License: Creative Commons Attribution-ShareAlike 4.0 International
+  https://creativecommons.org/licenses/by-sa/4.0/
+  This file and sky_milkyway_temp.json are distributed under the same license.
+Changes: alpha channel dropped; every pixel read as one blackbody star
+  (light amount a and temperature T) by inverting the renderer's own colour
+  model (white at 4200 K, saturation 4); a and a q(T) averaged down from
+  8000 x 4000 to 4096 x 2048 (box filter; q = the renderer's colour
+  coordinate (B - R) / (R + G + B)); a and T stored in 12 bits each,
+  packed into the RGB channels of a PNG (not a viewable picture).
