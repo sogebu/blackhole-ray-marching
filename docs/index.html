@@ -1747,7 +1747,10 @@ async function main(){
   gl.activeTexture(gl.TEXTURE0);
   gl.uniform1i(U("uSkyAT"), 9);
   gl.uniform1i(U("uSkyTab"), 10);
-  const skyKnobs = { skyTemp: true, skyDopAll: false, skyExpo: 1 };
+  // skyDopAll on by default (2026-11-18): the observer at rest receives the
+  // starlight shifted by g = 1/sqrt(1 - rS/R) in every direction, so its sky
+  // carries the sky's Doppler too (with dop, which is off for the grid)
+  const skyKnobs = { skyTemp: true, skyDopAll: true, skyExpo: 1 };
   // the sky's Doppler (knob dop; its checkbox is hidden): each sky keeps its
   // own setting, on for the photo sky and off for the grid by default
   // (2026-11-18); the checkbox shows the selected sky's (updateSky)
@@ -3053,7 +3056,8 @@ async function main(){
       if (o.diskRmin !== undefined) diskKnobs.diskRmin = o.diskRmin;
       // knobs of the photo sky by the stars' temperature (no UI): skyTemp
       // switches the scheme (loads its payload), skyDopAll shifts the sky of
-      // the observer at rest too (with dop), skyExpo multiplies the exposure
+      // the observer at rest too (with dop; on by default, false takes it off),
+      // skyExpo multiplies the exposure
       if (o.skyTemp !== undefined) { skyKnobs.skyTemp = !!o.skyTemp; if (skyKnobs.skyTemp) loadSkyTemp(); }
       if (o.skyDopAll !== undefined) skyKnobs.skyDopAll = !!o.skyDopAll;
       if (o.skyExpo !== undefined) skyKnobs.skyExpo = +o.skyExpo;
