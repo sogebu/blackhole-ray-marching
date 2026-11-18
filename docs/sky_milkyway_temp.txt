@@ -13,5 +13,8 @@ Changes: alpha channel dropped; every pixel read as one blackbody star
   (light amount a and temperature T) by inverting the renderer's own colour
   model (white at 4200 K, saturation 4); a and a q(T) averaged down from
   8000 x 4000 to 4096 x 2048 (box filter; q = the renderer's colour
-  coordinate (B - R) / (R + G + B)); a and T stored in 12 bits each,
-  packed into the RGB channels of a PNG (not a viewable picture).
+  coordinate (B - R) / (R + G + B)); a divided by the mean cos b (b = galactic
+  latitude) of the image rows it came from, so that it is a surface
+  brightness (a pixel of the equirectangular original holds the light of its
+  solid angle, which is proportional to cos b); a and T stored in 12 bits
+  each, packed into the RGB channels of a PNG (not a viewable picture).
